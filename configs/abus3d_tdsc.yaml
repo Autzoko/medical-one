@@ -28,8 +28,10 @@ train:
   grad_clip: 0.1
   amp: true
   log_every: 50
-  eval_every: 2000
+  eval_every: 1000
   seed: 0
+  ema_decay: 0.999
+  max_gpu_mem_gb: 16    # shared GPU: fail our job rather than squeeze others
 eval:
   iou_thrs: [0.1, 0.3]
   select_metric: froc@0.3

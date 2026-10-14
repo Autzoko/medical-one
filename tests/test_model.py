@@ -34,3 +34,18 @@ def test_param_count_matches_export():
     # The exported graph holds ~17.56M weights once precomputed constants are excluded.
     n = sum(p.numel() for p in ABUSDet3D().parameters())
     assert abs(n / 1e6 - 17.57) < 0.05
+
+
+def test_trainer_ema_tracks_weights(tmp_path, monkeypatch):
+    from medical_one.config import load_config
+    from medical_one.engine import trainer as tr
+
+    monkeypatch.setattr(tr, "load_meta", lambda _: {"Train": [], "Validation": [], "Test": []})
+    cfg = load_config(None, [f"paths.runs_dir={tmp_path}", "train.ema_decay=0.5", "model.num_queries=10"])
+    t = tr.Trainer(cfg, device="cpu")
+    p = next(t.model.parameters())
+    with torch.no_grad():
+        p.add_(1.0)
+    before = next(t.ema.parameters()).clone()
+    t._update_ema()
+    assert torch.allclose(next(t.ema.parameters()), 0.5 * before + 0.5 * p)

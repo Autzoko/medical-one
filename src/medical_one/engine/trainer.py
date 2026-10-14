@@ -1,4 +1,5 @@
 """Training loop: AdamW, linear warmup + cosine decay, bf16 autocast, periodic validation."""
+import copy
 import json
 import math
 import os
@@ -49,8 +50,12 @@ class Trainer:
         self.cfg, self.device = cfg, device
         _seed(cfg.train.seed)
         torch.backends.cudnn.benchmark = True
+        if cfg.train.max_gpu_mem_gb > 0 and device.startswith("cuda"):
+            total = torch.cuda.get_device_properties(device).total_memory / 2**30
+            torch.cuda.set_per_process_memory_fraction(min(1.0, cfg.train.max_gpu_mem_gb / total), device)
         self.splits = load_meta(cfg.paths.prep_dir)
         self.model = build_model(cfg).to(device)
+        self.ema = copy.deepcopy(self.model).eval().requires_grad_(False) if cfg.train.ema_decay > 0 else None
         self.criterion = SetCriterion(cfg.loss.w_cls, cfg.loss.w_l1, cfg.loss.w_giou)
         t = cfg.train
         offsets = [p for n, p in self.model.named_parameters() if "sampling_offsets" in n]
@@ -75,8 +80,23 @@ class Trainer:
         for group, base in zip(self.opt.param_groups, self.base_lrs):
             group["lr"] = base * factor
 
+    @torch.no_grad()
+    def _update_ema(self) -> None:
+        if self.ema is None:
+            return
+        d = self.cfg.train.ema_decay
+        for e, p in zip(self.ema.state_dict().values(), self.model.state_dict().values()):
+            if e.dtype.is_floating_point:
+                e.mul_(d).add_(p.detach(), alpha=1 - d)
+            else:
+                e.copy_(p)
+
     def _save(self, name: str, it: int, **extra) -> None:
-        torch.save({"model": self.model.state_dict(), "it": it, **extra}, os.path.join(self.cfg.run_dir, name))
+        """``model`` holds the weights used for evaluation (EMA if enabled); ``raw`` the trained weights."""
+        state = {"model": (self.ema if self.ema is not None else self.model).state_dict(), "it": it, **extra}
+        if self.ema is not None:
+            state["raw"] = self.model.state_dict()
+        torch.save(state, os.path.join(self.cfg.run_dir, name))
 
     def fit(self) -> None:
         cfg, t = self.cfg, self.cfg.train
@@ -97,12 +117,13 @@ class Trainer:
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), t.grad_clip)
             self.opt.step()
+            self._update_ema()
             if it % t.log_every == 0:
                 self._log({"it": it, "loss": round(loss.item(), 4), "last": round(last.item(), 4),
                            "gnorm": round(grad_norm.item(), 3), "lr": self.opt.param_groups[0]["lr"],
                            "sec": round(time.time() - start, 1)})
             if it % t.eval_every == 0 or it == t.iters:
-                res = evaluate(self.model, cfg, self.splits["Validation"], self.device)
+                res = evaluate(self.ema if self.ema is not None else self.model, cfg, self.splits["Validation"], self.device)
                 res["it"] = it
                 self._log({"eval": res}, prefix="EVAL ")
                 self._save("last.pt", it)

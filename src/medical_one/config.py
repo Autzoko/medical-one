@@ -49,6 +49,8 @@ class TrainConfig:
     log_every: int = 50
     eval_every: int = 2000
     seed: int = 0
+    ema_decay: float = 0.0  # 0 disables EMA; evaluation/selection then uses the raw weights
+    max_gpu_mem_gb: float = 0.0  # 0 = no cap; otherwise cap this process to protect shared GPUs
 
 
 @dataclass
