@@ -51,8 +51,10 @@ class Trainer:
         _seed(cfg.train.seed)
         torch.backends.cudnn.benchmark = True
         if cfg.train.max_gpu_mem_gb > 0 and device.startswith("cuda"):
-            total = torch.cuda.get_device_properties(device).total_memory / 2**30
-            torch.cuda.set_per_process_memory_fraction(min(1.0, cfg.train.max_gpu_mem_gb / total), device)
+            index = torch.device(device).index
+            index = torch.cuda.current_device() if index is None else index
+            total = torch.cuda.get_device_properties(index).total_memory / 2**30
+            torch.cuda.set_per_process_memory_fraction(min(1.0, cfg.train.max_gpu_mem_gb / total), index)
         self.splits = load_meta(cfg.paths.prep_dir)
         self.model = build_model(cfg).to(device)
         self.ema = copy.deepcopy(self.model).eval().requires_grad_(False) if cfg.train.ema_decay > 0 else None
