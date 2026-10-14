@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+
+# Data, outputs and checkpoints (never commit patient data or weights)
+data/
+runs/
+logs/
+outputs/
+*.nrrd
+*.nii
+*.nii.gz
+*.npy
+*.npz
+*.zip
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.m
+wandb/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

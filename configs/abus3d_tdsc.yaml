@@ -1,0 +1,35 @@
+# ABUS 3D detector reproduction on TDSC-ABUS (paths are for NYUAIRLAB-127).
+name: abus3d_tdsc
+paths:
+  tdsc_root: ~/data-001/langtian/data/medical-image/ABUS_TDSC
+  extracted_train: ~/langtian/abus3d_repro/data/raw/Train   # official Train/ ships zipped
+  prep_dir: ~/langtian/abus3d_repro/data/prep
+  runs_dir: ~/langtian/abus3d_repro/runs
+model:
+  norm: gn          # BN was folded at export; GN is safer at batch size 2
+  dim: 192
+  num_queries: 900
+  dropout: 0.0
+data:
+  pos_prob: 0.7
+  margin: 24
+  num_workers: 8
+loss:
+  w_cls: 2.0
+  w_l1: 5.0
+  w_giou: 2.0
+train:
+  iters: 20000
+  batch_size: 2
+  lr: 2.0e-4
+  offset_lr_mult: 0.1
+  weight_decay: 1.0e-4
+  warmup_iters: 500
+  grad_clip: 0.1
+  amp: true
+  log_every: 50
+  eval_every: 2000
+  seed: 0
+eval:
+  iou_thrs: [0.1, 0.3]
+  select_metric: froc@0.3
