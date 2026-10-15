@@ -1,0 +1,4 @@
+# nnU-Net v2 segmentation baseline (overlay on the base torch env)
+nnunetv2==2.8.1
+nibabel
+matplotlib

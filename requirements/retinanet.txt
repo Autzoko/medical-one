@@ -1,0 +1,3 @@
+# MONAI 3D RetinaNet baseline and report figures (overlay on the base torch env)
+monai==1.6.1
+matplotlib

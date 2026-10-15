@@ -28,3 +28,14 @@ def test_official_froc_counts_misses_as_false_positives():
     score, key, _, _ = official_froc(per_volume)
     assert 0 < score < 1 and abs(key[-1] - 0.5) < 1e-6  # 1 of 2 lesions found, at 1 FP/scan (+EPS as official)
     assert average_precision(per_volume, 0.3) < 1
+
+
+def test_prob_to_boxes_gives_half_open_component_boxes():
+    from medical_one.baselines.seg_to_det import prob_to_boxes
+
+    prob = np.zeros((40, 20, 40), np.float32)
+    prob[5:15, 2:8, 10:30] = 0.9
+    prob[30:34, 10:14, 1:5] = 0.6
+    boxes, scores = prob_to_boxes(prob, threshold=0.5)
+    assert boxes.tolist() == [[5, 2, 10, 15, 8, 30], [30, 10, 1, 34, 14, 5]]
+    assert np.allclose(scores.numpy(), [0.9, 0.6])

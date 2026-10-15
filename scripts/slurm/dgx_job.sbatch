@@ -10,6 +10,8 @@
 #   COMMIT=$(git rev-parse HEAD) sbatch -J ev scripts/slurm/dgx_job.sbatch evaluate run.pt --split Test
 #   COMMIT=$(git rev-parse HEAD) sbatch -J evs scripts/slurm/dgx_job.sbatch evaluate-list $SHARED/evals.txt
 #     (one evaluate.py argument line per row; staging is paid once for the whole list)
+#   COMMIT=... EXTRAS=baselines sbatch -J rn scripts/slurm/dgx_job.sbatch run scripts/baselines/train_retinanet.py ...
+#     (EXTRAS=<name> installs requirements/<name>.txt into an overlay venv on top of the base env)
 #SBATCH -p spark
 #SBATCH --gres=gpu:1
 #SBATCH -c 20
@@ -28,6 +30,9 @@ mkdir -p "$L"
 trap 'rm -rf "$L"' EXIT
 echo "[$(date)] $(hostname) $(nvidia-smi --query-gpu=name --format=csv,noheader) commit=$COMMIT mode=$MODE $*"
 
+git clone -q "$REPO" "$L/code"
+git -C "$L/code" checkout -q "$COMMIT"
+
 mkdir -p "$(dirname "$ENV")"
 (
     flock 9
@@ -40,22 +45,42 @@ mkdir -p "$(dirname "$ENV")"
     fi
 ) 9>"$ENV.lock"
 
-git clone -q "$REPO" "$L/code"
-git -C "$L/code" checkout -q "$COMMIT"
+PY=$ENV/bin/python
+if [ -n "${EXTRAS:-}" ]; then
+    REQ="$L/code/requirements/$EXTRAS.txt"
+    XENV=$ENV-$EXTRAS
+    STAMP="$XENV/.req-$(md5sum "$REQ" | cut -c1-12)"
+    (
+        flock 9
+        if [ ! -f "$STAMP" ]; then
+            echo "[$(date)] building overlay env $XENV"
+            [ -x "$XENV/bin/python" ] || python3 -m venv "$XENV"
+            base=$("$ENV/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+            over=$("$XENV/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+            echo "$base" > "$over/_base_env.pth"  # reuse torch etc. from the base env
+            "$XENV/bin/pip" install -q --upgrade pip
+            "$XENV/bin/pip" install -q -r "$REQ" && touch "$STAMP"
+        fi
+    ) 9>"$XENV.lock"
+    PY=$XENV/bin/python
+    export PATH="$XENV/bin:$PATH"
+fi
+
 cp -r "$SHARED/data/prep" "$L/prep"
 echo "[$(date)] staged code and data"
 
 cd "$L/code"
-export PYTHONPATH="$L/code/src" PYTHONNOUSERSITE=1
+export PYTHONPATH="$L/code/src" PYTHONNOUSERSITE=1 PREP_DIR="$L/prep" RUNS_DIR="$SHARED/runs" LOCAL_DIR="$L"
 PATHS=(paths.prep_dir="$L/prep" paths.runs_dir="$SHARED/runs" train.max_gpu_mem_gb=0)
 case "$MODE" in
-    train) "$ENV/bin/python" scripts/train.py --config configs/abus3d_tdsc.yaml "${PATHS[@]}" "$@" ;;
-    evaluate) "$ENV/bin/python" scripts/evaluate.py --config configs/abus3d_tdsc.yaml "$@" --set "${PATHS[@]}" ;;
+    train) "$PY" scripts/train.py --config configs/abus3d_tdsc.yaml "${PATHS[@]}" "$@" ;;
+    evaluate) "$PY" scripts/evaluate.py --config configs/abus3d_tdsc.yaml "$@" --set "${PATHS[@]}" ;;
+    run) "$PY" "$@" ;;
     evaluate-list)
         while IFS= read -r line; do
             [ -z "$line" ] && continue
             eval "args=($line)"
-            "$ENV/bin/python" scripts/evaluate.py --config configs/abus3d_tdsc.yaml "${args[@]}" --set "${PATHS[@]}"
+            "$PY" scripts/evaluate.py --config configs/abus3d_tdsc.yaml "${args[@]}" --set "${PATHS[@]}"
         done < "$1" ;;
     *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
