@@ -45,6 +45,13 @@ def to_working_space(img: np.ndarray) -> np.ndarray:
     return v.round().clamp(0, 255).to(torch.uint8).numpy()
 
 
+def mask_to_working_space(mask: np.ndarray) -> np.ndarray:
+    """Binary lesion mask on the working grid (trilinear resize of the 0/1 mask, threshold 0.5)."""
+    m = torch.from_numpy(np.ascontiguousarray((mask > 0).transpose(1, 0, 2)[:, ::-1, :])).float()[None, None]
+    m = F.interpolate(m, size=RESIZE, mode="trilinear", align_corners=False)[0, 0, :, :KEEP_DEPTH]
+    return (m >= 0.5).to(torch.uint8).numpy()
+
+
 def box_to_working_space(lo: Sequence[int], hi: Sequence[int], shape: Sequence[int]) -> Tuple[List[float], float]:
     n0, n1, n2 = shape
     s = (RESIZE[0] / n1, RESIZE[1] / n0, RESIZE[2] / n2)
@@ -75,6 +82,29 @@ def _process(args: Tuple[Dict[str, str], str, int, str]) -> CaseMeta:
     os.makedirs(os.path.join(roots["out"], split), exist_ok=True)
     np.save(os.path.join(roots["out"], split, f"{case:03d}.npy"), to_working_space(img))
     return CaseMeta(split, case, label, list(img.shape), lo, hi, box, kept)
+
+
+def _process_mask(args: Tuple[Dict[str, str], str, int, str]) -> Tuple[str, int, int]:
+    roots, split, case, _ = args
+    torch.set_num_threads(2)
+    mask, _ = nrrd.read(case_paths(roots.get(split, roots["default"]), split, case)[1])
+    out = mask_to_working_space(mask)
+    os.makedirs(os.path.join(roots["out"], "masks", split), exist_ok=True)
+    np.save(os.path.join(roots["out"], "masks", split, f"{case:03d}.npy"), out)
+    return split, case, int(out.sum())
+
+
+def export_masks(root: str, out_dir: str, extracted_train: str = "", workers: int = 4) -> List[Tuple[str, int, int]]:
+    """Working-space lesion masks under ``out_dir/masks/<split>/`` (for segmentation-based baselines)."""
+    roots = {"default": root, "out": out_dir}
+    if extracted_train:
+        roots["Train"] = extracted_train
+    jobs = []
+    for split in SPLITS:
+        df = pd.read_csv(os.path.join(root, split, "labels.csv"))
+        jobs += [(roots, split, int(r.case_id), r.label) for r in df.itertuples()]
+    with Pool(workers) as pool:
+        return pool.map(_process_mask, jobs, chunksize=1)
 
 
 def preprocess_tdsc(root: str, out_dir: str, extracted_train: str = "", workers: int = 10) -> List[CaseMeta]:
