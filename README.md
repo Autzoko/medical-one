@@ -66,6 +66,13 @@ Training samples random 176×96×176 patches; evaluation runs 9 overlapping wind
 
 ## Evaluation
 
-Lesion-level metrics at IoU 0.1 / 0.3: top-1 hit rate, recall, and FROC (mean sensitivity at
-0.125–8 FPs per volume). This protocol is ours and has not been checked against the official
-TDSC challenge script.
+The primary score is the **official TDSC-ABUS 2023 detection metric** (`tdsc_froc`), re-implemented in
+`evaluation/tdsc_official.py` from the organizers' `Final_Evaluation/det_score.py` and checked to give
+identical results on the same CSVs: boxes are mapped back to raw-array voxels, a prediction hits when
+IoU > 0.3, duplicate hits are not false positives, and the score is the mean recall at
+0.125, 0.25, 0.5, 1, 2, 4, 8 FPs per scan (probability thresholds swept in steps of 0.005).
+
+Also reported: COCO-style AP at IoU 0.1 / 0.3 (`ap@t`, IoU 0.1 is the usual nnDetection setting) and a
+stricter in-house protocol on working-space boxes (`froc@t`, `top1_hit@t`, `recall_any@t`; duplicate
+hits count as FPs). `evaluate.py --save-preds` stores per-case predictions; `score_preds.py` rescoring
+them, fusing several files into an ensemble, or exporting the challenge CSV format.

@@ -69,13 +69,14 @@ def _unflip(boxes: torch.Tensor, axes: Sequence[int], shape: Sequence[int]) -> t
 
 @torch.no_grad()
 def predict_volume_fused(models: Sequence, volume: np.ndarray, device: str = "cuda", tta_flips: bool = True,
-                         wbf_iou: float = 0.5, max_dets: int = 50) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Runs every model on the volume (and its d / w / dw flips if ``tta_flips``), then fuses with WBF."""
+                         wbf_iou: float = 0.5, max_dets: int = 50, **post) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Runs every model on the volume (and its d / w / dw flips if ``tta_flips``), then fuses with WBF.
+    ``post`` is forwarded to ``predict_volume``."""
     sources = []
     for model in models:
         for axes in (FLIP_AXES if tta_flips else ((),)):
             vol = np.ascontiguousarray(np.flip(volume, axes)) if axes else volume
-            boxes, scores = predict_volume(model, vol, device)
+            boxes, scores = predict_volume(model, vol, device, max_dets=max_dets, **post)
             sources.append((_unflip(boxes, axes, volume.shape), scores))
     boxes, scores = weighted_box_fusion(sources, wbf_iou)
     return boxes[:max_dets], scores[:max_dets]

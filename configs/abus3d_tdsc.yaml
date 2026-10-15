@@ -34,4 +34,4 @@ train:
   max_gpu_mem_gb: 16    # shared GPU: fail our job rather than squeeze others
 eval:
   iou_thrs: [0.1, 0.3]
-  select_metric: froc@0.3
+  select_metric: tdsc_froc   # official TDSC-ABUS detection score (see evaluation/tdsc_official.py)

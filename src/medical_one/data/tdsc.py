@@ -54,6 +54,15 @@ def box_to_working_space(lo: Sequence[int], hi: Sequence[int], shape: Sequence[i
     return [round(b, 3) for b in box], round((box[4] - box[1]) / full_depth, 4)
 
 
+def boxes_to_original(boxes: torch.Tensor, shape: Sequence[int]) -> torch.Tensor:
+    """Inverse of ``box_to_working_space``: working-space corners [N,6] -> raw-array corners [N,6]
+    (lo0, lo1, lo2, hi0, hi1, hi2) in continuous half-open voxel units of the raw [N0, N1, N2] array."""
+    n0, n1, n2 = shape
+    s = (RESIZE[0] / n1, RESIZE[1] / n0, RESIZE[2] / n2)
+    d0, h0, w0, d1, h1, w1 = boxes.unbind(-1)
+    return torch.stack([n0 - h1 / s[1], d0 / s[0], w0 / s[2], n0 - h0 / s[1], d1 / s[0], w1 / s[2]], -1)
+
+
 def _process(args: Tuple[Dict[str, str], str, int, str]) -> CaseMeta:
     roots, split, case, label = args
     torch.set_num_threads(4)

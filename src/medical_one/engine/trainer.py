@@ -5,7 +5,7 @@ import math
 import os
 import random
 import time
-from typing import Dict, List, Sequence, Union
+from typing import Dict, List, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -13,10 +13,9 @@ import torch
 from ..config import Config
 from ..data.dataset import PatchDataset, collate
 from ..data.tdsc import load_meta, load_volume
-from ..evaluation.froc import detection_metrics
+from ..evaluation.metrics import compute_metrics
 from ..losses.set_criterion import SetCriterion
 from ..models.detector import ABUSDet3D
-from ..utils.boxes import box_iou_giou
 from .inference import predict_volume, predict_volume_fused
 
 
@@ -26,26 +25,29 @@ def build_model(cfg: Config) -> ABUSDet3D:
 
 
 @torch.no_grad()
-def evaluate(model: Union[ABUSDet3D, Sequence[ABUSDet3D]], cfg: Config, metas: List[dict],
-             device: str) -> Dict[str, object]:
+def predict_split(model: Union[ABUSDet3D, Sequence[ABUSDet3D]], cfg: Config, metas: List[dict],
+                  device: str) -> List[Tuple[torch.Tensor, torch.Tensor]]:
     """A single model without TTA uses plain sliding-window NMS; otherwise predictions are WBF-fused."""
     models = list(model) if isinstance(model, (list, tuple)) else [model]
     modes = [m.training for m in models]
     for m in models:
         m.eval()
-    per_volume = []
+    post = cfg.eval.postprocess()
+    preds = []
     for meta in metas:
         volume = load_volume(cfg.paths.prep_dir, meta)
         if len(models) == 1 and not cfg.eval.tta_flips:
-            boxes, scores = predict_volume(models[0], volume, device)
+            preds.append(predict_volume(models[0], volume, device, **post))
         else:
-            boxes, scores = predict_volume_fused(models, volume, device, cfg.eval.tta_flips, cfg.eval.wbf_iou)
-        gt = torch.tensor(meta["box"])[None]
-        ious = box_iou_giou(boxes, gt)[0][:, 0] if len(boxes) else torch.zeros(0)
-        per_volume.append((scores, ious))
+            preds.append(predict_volume_fused(models, volume, device, cfg.eval.tta_flips, cfg.eval.wbf_iou, **post))
     for m, mode in zip(models, modes):
         m.train(mode)
-    return detection_metrics(per_volume, cfg.eval.iou_thrs)
+    return preds
+
+
+def evaluate(model: Union[ABUSDet3D, Sequence[ABUSDet3D]], cfg: Config, metas: List[dict],
+             device: str) -> Dict[str, object]:
+    return compute_metrics(predict_split(model, cfg, metas, device), metas, cfg.eval.iou_thrs)
 
 
 def _seed(seed: int) -> None:

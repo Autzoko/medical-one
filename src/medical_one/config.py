@@ -63,6 +63,17 @@ class EvalConfig:
     select_metric: str = "froc@0.3"
     tta_flips: bool = False  # also predict on d / w / dw flipped volumes and fuse with WBF
     wbf_iou: float = 0.5  # WBF cluster IoU for TTA / ensembles
+    # sliding-window post-processing (defaults follow the deployed per-window logic)
+    top_k: int = 300
+    score_thr: float = 0.01
+    window_nms: float = 0.05
+    max_per_window: int = 100
+    fuse_nms: float = 0.1
+    max_dets: int = 50
+
+    def postprocess(self) -> Dict[str, Any]:
+        keys = ("top_k", "score_thr", "window_nms", "max_per_window", "fuse_nms", "max_dets")
+        return {k: getattr(self, k) for k in keys}
 
 
 @dataclass
