@@ -9,7 +9,7 @@ import yaml
 @dataclass
 class PathsConfig:
     tdsc_root: str = "~/data-001/langtian/data/medical-image/ABUS_TDSC"
-    extracted_train: str = "~/langtian/abus3d_repro/data/raw/Train"
+    extracted_train: str = "~/langtian/abus3d_repro/data/raw"  # parent of the unzipped Train/
     prep_dir: str = "~/langtian/abus3d_repro/data/prep"
     runs_dir: str = "~/langtian/abus3d_repro/runs"
 

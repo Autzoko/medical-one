@@ -108,7 +108,7 @@ def export_masks(root: str, out_dir: str, extracted_train: str = "", workers: in
 
 
 def preprocess_tdsc(root: str, out_dir: str, extracted_train: str = "", workers: int = 10) -> List[CaseMeta]:
-    """``extracted_train`` points at an unzipped copy of Train/ (the official release zips it)."""
+    """``extracted_train`` is the parent of an unzipped copy of Train/ (the official release zips it)."""
     roots = {"default": root, "out": out_dir}
     if extracted_train:
         roots["Train"] = extracted_train

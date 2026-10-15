@@ -2,7 +2,7 @@
 name: abus3d_tdsc
 paths:
   tdsc_root: ~/data-001/langtian/data/medical-image/ABUS_TDSC
-  extracted_train: ~/langtian/abus3d_repro/data/raw/Train   # official Train/ ships zipped
+  extracted_train: ~/langtian/abus3d_repro/data/raw   # parent of the unzipped Train/ (the release zips it)
   prep_dir: ~/langtian/abus3d_repro/data/prep
   runs_dir: ~/langtian/abus3d_repro/runs
 model:
