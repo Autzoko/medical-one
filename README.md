@@ -23,6 +23,7 @@ constants, proposal priors) are our own choices, since the original training cod
 ```
 configs/                experiment configs (YAML)
 scripts/                entry points: preprocess, train, evaluate, benchmark
+  slurm/                DGX Spark job script
 src/medical_one/
   models/               backbone, 3D deformable attention, transformer, detector
   data/                 TDSC-ABUS preprocessing, patch dataset
@@ -43,7 +44,18 @@ python scripts/evaluate.py <run_dir>/best.pt --split Test
 pytest
 ```
 
-Any config value can be overridden on the command line as `section.key=value`.
+Any config value can be overridden on the command line as `section.key=value`
+(`evaluate.py` takes them after `--set`). Several checkpoints passed to `evaluate.py` are ensembled;
+`eval.tta_flips=true` adds flip test-time augmentation, both fused with weighted box fusion.
+
+### DGX Spark cluster (Slurm)
+
+Compute nodes are aarch64 GB10 and do not mount the login node's `/home`; data, runs and logs live on
+the shared mount `/media/cvpr/langtian/abus3d`. Submit from the repo on `dgx-login`:
+
+```bash
+COMMIT=$(git rev-parse HEAD) sbatch -J exp1 scripts/slurm/dgx_job.sbatch train name=exp1 train.iters=10000
+```
 
 ## Data preprocessing
 

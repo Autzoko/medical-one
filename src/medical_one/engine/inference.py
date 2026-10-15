@@ -3,15 +3,16 @@
 Follows the deployed per-window logic (sigmoid, top300, score>0.01, NMS IoU>0.05, at most 100,
 strict center keep with margin 22) but crops contiguously and reads every candidate row, i.e.
 without the non-contiguous-buffer and repeated-first-row defects found in the original DLL.
-Cross-window fusion uses NMS instead of the deployed single-source WBF.
+Cross-window fusion uses NMS instead of the deployed single-source WBF. ``predict_volume_fused``
+adds flip test-time augmentation and multi-model ensembling on top, fused with WBF.
 """
-from typing import Tuple
+from typing import Sequence, Tuple
 
 import numpy as np
 import torch
 
 from ..data.dataset import PATCH, normalize
-from ..utils.boxes import nms_3d
+from ..utils.boxes import nms_3d, weighted_box_fusion
 
 WINDOW_STARTS = (0, 80, 160)
 CENTER_MARGIN = 22
@@ -54,3 +55,27 @@ def predict_volume(model, volume: np.ndarray, device: str = "cuda", top_k: int =
     boxes, scores = torch.cat(all_boxes), torch.cat(all_scores)
     keep = nms_3d(boxes, scores, fuse_nms)[:max_dets]
     return boxes[keep].cpu(), scores[keep].cpu()
+
+
+FLIP_AXES = ((), (0,), (2,), (0, 2))
+
+
+def _unflip(boxes: torch.Tensor, axes: Sequence[int], shape: Sequence[int]) -> torch.Tensor:
+    boxes = boxes.clone()
+    for a in axes:
+        boxes[:, [a, a + 3]] = shape[a] - boxes[:, [a + 3, a]]
+    return boxes
+
+
+@torch.no_grad()
+def predict_volume_fused(models: Sequence, volume: np.ndarray, device: str = "cuda", tta_flips: bool = True,
+                         wbf_iou: float = 0.5, max_dets: int = 50) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Runs every model on the volume (and its d / w / dw flips if ``tta_flips``), then fuses with WBF."""
+    sources = []
+    for model in models:
+        for axes in (FLIP_AXES if tta_flips else ((),)):
+            vol = np.ascontiguousarray(np.flip(volume, axes)) if axes else volume
+            boxes, scores = predict_volume(model, vol, device)
+            sources.append((_unflip(boxes, axes, volume.shape), scores))
+    boxes, scores = weighted_box_fusion(sources, wbf_iou)
+    return boxes[:max_dets], scores[:max_dets]

@@ -1,5 +1,5 @@
 """Axis-aligned 3D box utilities. Corner format is (d0, h0, w0, d1, h1, w1), continuous (no +1)."""
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 
 import torch
 
@@ -38,3 +38,33 @@ def nms_3d(boxes: torch.Tensor, scores: torch.Tensor, iou_threshold: float) -> L
         iou = box_iou_giou(boxes[i][None], boxes[order[1:]])[0][0]
         order = order[1:][iou <= iou_threshold]
     return keep
+
+
+def weighted_box_fusion(sources: Sequence[Tuple[torch.Tensor, torch.Tensor]], iou_threshold: float = 0.5,
+                        ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Fuse (boxes [N,6], scores [N]) from several predictors (TTA passes / models).
+
+    Boxes are visited by descending score and joined to the best-overlapping cluster if its fused box has
+    IoU > ``iou_threshold``. A cluster's box is the score-weighted mean of its members and its score
+    is sum(scores) / len(sources), so a box found by only one predictor is down-weighted.
+    """
+    boxes = torch.cat([b for b, _ in sources]) if sources else torch.zeros(0, 6)
+    scores = torch.cat([s for _, s in sources]) if sources else torch.zeros(0)
+    fused: List[torch.Tensor] = []
+    members: List[List[int]] = []
+    for i in scores.argsort(descending=True).tolist():
+        if fused:
+            iou = box_iou_giou(boxes[i][None], torch.stack(fused))[0][0]
+            j = int(iou.argmax())
+            if iou[j] > iou_threshold:
+                members[j].append(i)
+                w = scores[members[j]]
+                fused[j] = (boxes[members[j]] * w[:, None]).sum(0) / w.sum()
+                continue
+        fused.append(boxes[i].clone())
+        members.append([i])
+    if not fused:
+        return boxes, scores
+    out_scores = torch.stack([scores[m].sum() for m in members]) / max(len(sources), 1)
+    order = out_scores.argsort(descending=True)
+    return torch.stack(fused)[order], out_scores[order]

@@ -27,6 +27,8 @@ class DataConfig:
     pos_prob: float = 0.7
     margin: int = 24
     num_workers: int = 8
+    scale_range: float = 0.0  # lateral zoom augmentation, e.g. 0.2 -> crop 0.8x..1.2x of the patch
+    noise_std: float = 0.0  # Gaussian noise in uint8 units
 
 
 @dataclass
@@ -57,6 +59,8 @@ class TrainConfig:
 class EvalConfig:
     iou_thrs: List[float] = field(default_factory=lambda: [0.1, 0.3])
     select_metric: str = "froc@0.3"
+    tta_flips: bool = False  # also predict on d / w / dw flipped volumes and fuse with WBF
+    wbf_iou: float = 0.5  # WBF cluster IoU for TTA / ensembles
 
 
 @dataclass

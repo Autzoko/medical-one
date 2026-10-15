@@ -5,7 +5,7 @@ import math
 import os
 import random
 import time
-from typing import Dict, List
+from typing import Dict, List, Sequence, Union
 
 import numpy as np
 import torch
@@ -17,7 +17,7 @@ from ..evaluation.froc import detection_metrics
 from ..losses.set_criterion import SetCriterion
 from ..models.detector import ABUSDet3D
 from ..utils.boxes import box_iou_giou
-from .inference import predict_volume
+from .inference import predict_volume, predict_volume_fused
 
 
 def build_model(cfg: Config) -> ABUSDet3D:
@@ -26,16 +26,25 @@ def build_model(cfg: Config) -> ABUSDet3D:
 
 
 @torch.no_grad()
-def evaluate(model: ABUSDet3D, cfg: Config, metas: List[dict], device: str) -> Dict[str, object]:
-    was_training = model.training
-    model.eval()
+def evaluate(model: Union[ABUSDet3D, Sequence[ABUSDet3D]], cfg: Config, metas: List[dict],
+             device: str) -> Dict[str, object]:
+    """A single model without TTA uses plain sliding-window NMS; otherwise predictions are WBF-fused."""
+    models = list(model) if isinstance(model, (list, tuple)) else [model]
+    modes = [m.training for m in models]
+    for m in models:
+        m.eval()
     per_volume = []
     for meta in metas:
-        boxes, scores = predict_volume(model, load_volume(cfg.paths.prep_dir, meta), device)
+        volume = load_volume(cfg.paths.prep_dir, meta)
+        if len(models) == 1 and not cfg.eval.tta_flips:
+            boxes, scores = predict_volume(models[0], volume, device)
+        else:
+            boxes, scores = predict_volume_fused(models, volume, device, cfg.eval.tta_flips, cfg.eval.wbf_iou)
         gt = torch.tensor(meta["box"])[None]
         ious = box_iou_giou(boxes, gt)[0][:, 0] if len(boxes) else torch.zeros(0)
         per_volume.append((scores, ious))
-    model.train(was_training)
+    for m, mode in zip(models, modes):
+        m.train(mode)
     return detection_metrics(per_volume, cfg.eval.iou_thrs)
 
 
@@ -103,7 +112,8 @@ class Trainer:
     def fit(self) -> None:
         cfg, t = self.cfg, self.cfg.train
         dataset = PatchDataset(cfg.paths.prep_dir, self.splits["Train"], t.iters * t.batch_size,
-                               cfg.data.pos_prob, cfg.data.margin)
+                               cfg.data.pos_prob, cfg.data.margin, scale_range=cfg.data.scale_range,
+                               noise_std=cfg.data.noise_std)
         loader = torch.utils.data.DataLoader(dataset, t.batch_size, num_workers=cfg.data.num_workers,
                                              collate_fn=collate, persistent_workers=cfg.data.num_workers > 0)
         best, start = -1.0, time.time()
