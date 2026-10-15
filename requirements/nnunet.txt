@@ -1,4 +1,5 @@
 # nnU-Net v2 segmentation baseline (overlay on the base torch env)
 nnunetv2==2.8.1
+setuptools  # provides distutils on Python 3.12 (imported by nnunetv2 preprocessing)
 nibabel
 matplotlib

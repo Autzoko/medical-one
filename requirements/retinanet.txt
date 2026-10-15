@@ -1,3 +1,6 @@
-# MONAI 3D RetinaNet baseline and report figures (overlay on the base torch env)
+# MONAI 3D RetinaNet / SwinUNETR baselines and report figures (overlay on the base torch env)
+--extra-index-url https://download.pytorch.org/whl/cu130
+torchvision==0.29.1+cu130  # matches torch 2.14.1+cu130 in the base env; MONAI FPN utils import it
 monai==1.6.1
+einops
 matplotlib
