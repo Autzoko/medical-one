@@ -111,7 +111,9 @@ class Trainer:
 
     def fit(self) -> None:
         cfg, t = self.cfg, self.cfg.train
-        dataset = PatchDataset(cfg.paths.prep_dir, self.splits["Train"], t.iters * t.batch_size,
+        train_metas = [m for split in cfg.data.train_splits for m in self.splits[split]]
+        stop = t.stop_iter or t.iters
+        dataset = PatchDataset(cfg.paths.prep_dir, train_metas, stop * t.batch_size,
                                cfg.data.pos_prob, cfg.data.margin, scale_range=cfg.data.scale_range,
                                noise_std=cfg.data.noise_std)
         loader = torch.utils.data.DataLoader(dataset, t.batch_size, num_workers=cfg.data.num_workers,
@@ -134,7 +136,7 @@ class Trainer:
                 self._log({"it": it, "loss": round(loss.item(), 4), "last": round(last.item(), 4),
                            "gnorm": round(grad_norm.item(), 3), "lr": self.opt.param_groups[0]["lr"],
                            "sec": round(time.time() - start, 1)})
-            if it % t.eval_every == 0 or it == t.iters:
+            if it % t.eval_every == 0 or it == stop:
                 res = evaluate(self.ema if self.ema is not None else self.model, cfg, self.splits["Validation"], self.device)
                 res["it"] = it
                 self._log({"eval": res}, prefix="EVAL ")
