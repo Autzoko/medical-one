@@ -30,6 +30,8 @@ class DataConfig:
     scale_range: float = 0.0  # lateral zoom augmentation, e.g. 0.2 -> crop 0.8x..1.2x of the patch
     noise_std: float = 0.0  # Gaussian noise in uint8 units
     train_splits: List[str] = field(default_factory=lambda: ["Train"])  # e.g. [Train, Validation] for a final fit
+    cv_folds: int = 0  # > 0: pool Train + Validation and hold out fold ``cv_fold`` of ``cv_folds`` for validation
+    cv_fold: int = 0
 
 
 @dataclass
@@ -54,6 +56,7 @@ class TrainConfig:
     seed: int = 0
     ema_decay: float = 0.0  # 0 disables EMA; evaluation/selection then uses the raw weights
     max_gpu_mem_gb: float = 0.0  # 0 = no cap; otherwise cap this process to protect shared GPUs
+    predict_test: bool = True  # after training, save Test predictions of best.pt (scored only at the end)
     stop_iter: int = 0  # stop early (and save) at this iteration while keeping the ``iters`` LR schedule; 0 = iters
 
 

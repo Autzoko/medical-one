@@ -52,12 +52,14 @@ if [ -n "${EXTRAS:-}" ]; then
     STAMP="$XENV/.req-$(md5sum "$REQ" | cut -c1-12)"
     (
         flock 9
+        [ -x "$XENV/bin/python" ] || python3 -m venv "$XENV"
+        base=$("$ENV/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+        over=$("$XENV/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+        # reuse torch etc. from the base env; addsitedir also runs the base env's own .pth hooks
+        # (e.g. setuptools' distutils shim, needed on Python 3.12)
+        echo "import site; site.addsitedir('$base')" > "$over/_base_env.pth"
         if [ ! -f "$STAMP" ]; then
             echo "[$(date)] building overlay env $XENV"
-            [ -x "$XENV/bin/python" ] || python3 -m venv "$XENV"
-            base=$("$ENV/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
-            over=$("$XENV/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
-            echo "$base" > "$over/_base_env.pth"  # reuse torch etc. from the base env
             "$XENV/bin/pip" install -q --upgrade pip
             "$XENV/bin/pip" install -q -r "$REQ" && touch "$STAMP"
         fi

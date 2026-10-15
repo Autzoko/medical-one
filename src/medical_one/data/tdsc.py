@@ -130,5 +130,24 @@ def load_meta(prep_dir: str) -> Dict[str, List[dict]]:
     return {s: [m for m in metas if m["split"] == s] for s in SPLITS}
 
 
+def cv_split(splits: Dict[str, List[dict]], folds: int, fold: int, seed: int = 0) -> Tuple[List[dict], List[dict]]:
+    """K-fold split of Train + Validation, stratified by benign / malignant; returns (train, held-out)."""
+    pool = sorted(splits["Train"] + splits["Validation"], key=lambda m: m["case"])
+    rng = np.random.RandomState(seed)
+    assign = {}
+    for label in sorted({m["label"] for m in pool}):
+        cases = [m["case"] for m in pool if m["label"] == label]
+        for i, case in enumerate(rng.permutation(cases)):
+            assign[int(case)] = i % folds
+    return [m for m in pool if assign[m["case"]] != fold], [m for m in pool if assign[m["case"]] == fold]
+
+
+def train_val_metas(splits: Dict[str, List[dict]], train_splits: Sequence[str], cv_folds: int = 0,
+                    cv_fold: int = 0) -> Tuple[List[dict], List[dict]]:
+    if cv_folds > 0:
+        return cv_split(splits, cv_folds, cv_fold)
+    return [m for s in train_splits for m in splits[s]], splits["Validation"]
+
+
 def load_volume(prep_dir: str, meta: dict) -> np.ndarray:
     return np.load(os.path.join(prep_dir, meta["split"], f"{meta['case']:03d}.npy"))

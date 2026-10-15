@@ -12,8 +12,9 @@ import torch
 
 from ..config import Config
 from ..data.dataset import PatchDataset, collate
-from ..data.tdsc import load_meta, load_volume
+from ..data.tdsc import load_meta, load_volume, train_val_metas
 from ..evaluation.metrics import compute_metrics
+from ..evaluation.preds import save_predictions
 from ..losses.set_criterion import SetCriterion
 from ..models.detector import ABUSDet3D
 from .inference import predict_volume, predict_volume_fused
@@ -113,7 +114,7 @@ class Trainer:
 
     def fit(self) -> None:
         cfg, t = self.cfg, self.cfg.train
-        train_metas = [m for split in cfg.data.train_splits for m in self.splits[split]]
+        train_metas, val_metas = train_val_metas(self.splits, cfg.data.train_splits, cfg.data.cv_folds, cfg.data.cv_fold)
         stop = t.stop_iter or t.iters
         dataset = PatchDataset(cfg.paths.prep_dir, train_metas, stop * t.batch_size,
                                cfg.data.pos_prob, cfg.data.margin, scale_range=cfg.data.scale_range,
@@ -139,10 +140,27 @@ class Trainer:
                            "gnorm": round(grad_norm.item(), 3), "lr": self.opt.param_groups[0]["lr"],
                            "sec": round(time.time() - start, 1)})
             if it % t.eval_every == 0 or it == stop:
-                res = evaluate(self.ema if self.ema is not None else self.model, cfg, self.splits["Validation"], self.device)
+                eval_model = self.ema if self.ema is not None else self.model
+                preds = predict_split(eval_model, cfg, val_metas, self.device)
+                res = compute_metrics(preds, val_metas, cfg.eval.iou_thrs)
                 res["it"] = it
                 self._log({"eval": res}, prefix="EVAL ")
                 self._save("last.pt", it)
                 if res[cfg.eval.select_metric] > best:
                     best = res[cfg.eval.select_metric]
                     self._save("best.pt", it, val=res)
+                    save_predictions(os.path.join(cfg.run_dir, "preds_val_best.json"), preds, val_metas,
+                                     {"checkpoint": "best.pt", "it": it})
+        if cfg.train.predict_test:
+            self._predict_test()
+
+    @torch.no_grad()
+    def _predict_test(self) -> None:
+        """Test-set predictions of best.pt and last.pt, saved for later scoring (never used for selection)."""
+        model = build_model(self.cfg).to(self.device)
+        metas = self.splits["Test"]
+        for ckpt, out in (("best.pt", "preds_Test.json"), ("last.pt", "preds_Test_last.json")):
+            state = torch.load(os.path.join(self.cfg.run_dir, ckpt), map_location=self.device, weights_only=False)
+            model.load_state_dict(state["model"])
+            save_predictions(os.path.join(self.cfg.run_dir, out), predict_split(model, self.cfg, metas, self.device),
+                             metas, {"checkpoint": ckpt, "it": state["it"]})
