@@ -8,6 +8,8 @@
 # Usage, from the repo on dgx-login:
 #   COMMIT=$(git rev-parse HEAD) sbatch -J exp1 scripts/slurm/dgx_job.sbatch train name=exp1 train.iters=10000
 #   COMMIT=$(git rev-parse HEAD) sbatch -J ev scripts/slurm/dgx_job.sbatch evaluate run.pt --split Test
+#   COMMIT=$(git rev-parse HEAD) sbatch -J evs scripts/slurm/dgx_job.sbatch evaluate-list $SHARED/evals.txt
+#     (one evaluate.py argument line per row; staging is paid once for the whole list)
 #SBATCH -p spark
 #SBATCH --gres=gpu:1
 #SBATCH -c 20
@@ -49,6 +51,12 @@ PATHS=(paths.prep_dir="$L/prep" paths.runs_dir="$SHARED/runs" train.max_gpu_mem_
 case "$MODE" in
     train) "$ENV/bin/python" scripts/train.py --config configs/abus3d_tdsc.yaml "${PATHS[@]}" "$@" ;;
     evaluate) "$ENV/bin/python" scripts/evaluate.py --config configs/abus3d_tdsc.yaml "$@" --set "${PATHS[@]}" ;;
+    evaluate-list)
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            eval "args=($line)"
+            "$ENV/bin/python" scripts/evaluate.py --config configs/abus3d_tdsc.yaml "${args[@]}" --set "${PATHS[@]}"
+        done < "$1" ;;
     *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 echo "[$(date)] done"

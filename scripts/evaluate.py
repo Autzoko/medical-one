@@ -18,7 +18,8 @@ def main() -> None:
     ap.add_argument("--config", default="configs/abus3d_tdsc.yaml")
     ap.add_argument("--split", default="Validation", choices=["Train", "Validation", "Test"])
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--set", dest="overrides", nargs="*", default=[], help="key.sub=value")
+    ap.add_argument("--set", dest="overrides", nargs="*", action="extend", default=[],
+                    help="key.sub=value (may be repeated)")
     args = ap.parse_args()
     cfg = load_config(args.config, args.overrides)
     models = []
