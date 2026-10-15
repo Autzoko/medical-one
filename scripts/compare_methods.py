@@ -3,8 +3,10 @@
   python scripts/compare_methods.py --meta meta.json --split Test --ref "DETR" \
       --method "DETR=a.json,b.json" --method "nnU-Net=c.json" --out results.json
 
-Several files for one method are WBF-fused per case (an ensemble). The bootstrap resamples cases
-(with replacement) jointly for all methods, so differences to ``--ref`` are paired.
+Several files for one method are WBF-fused per case (an ensemble); files joined with "+" are instead
+concatenated (disjoint cases, e.g. out-of-fold predictions: --split Train,Validation --method
+"DETR OOF=f0.json+f1.json+..."). The bootstrap resamples cases (with replacement) jointly for all
+methods, so differences to ``--ref`` are paired.
 """
 import argparse
 import json
@@ -32,7 +34,7 @@ def boot_stats(pv, idx):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--meta", required=True)
-    ap.add_argument("--split", default="Test")
+    ap.add_argument("--split", default="Test", help="one split or several, comma-separated")
     ap.add_argument("--method", action="append", required=True, help="name=file1[,file2,...]")
     ap.add_argument("--ref", default="")
     ap.add_argument("--wbf-iou", type=float, default=0.5)
@@ -40,11 +42,11 @@ def main() -> None:
     ap.add_argument("--out", default="")
     args = ap.parse_args()
     with open(args.meta) as f:
-        metas = [m for m in json.load(f) if m["split"] == args.split]
+        metas = [m for m in json.load(f) if m["split"] in args.split.split(",")]
     methods, results = {}, {}
     for item in args.method:
         name, files = item.split("=", 1)
-        sources = [load_predictions(p, metas) for p in files.split(",")]
+        sources = [load_predictions(p.split("+"), metas) for p in files.split(",")]
         preds = sources[0] if len(sources) == 1 else fuse_predictions(sources, args.wbf_iou)
         methods[name] = per_volume(preds, metas)
         res = compute_metrics(preds, metas)

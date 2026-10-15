@@ -1,6 +1,6 @@
 """Prediction files: per-case working-space boxes and scores, shared by every detector we compare."""
 import json
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple, Union
 
 import torch
 
@@ -18,10 +18,18 @@ def save_predictions(path: str, preds: Sequence[Prediction], metas: Sequence[dic
         json.dump({"info": info, "cases": cases}, f)
 
 
-def load_predictions(path: str, metas: Sequence[dict]) -> List[Prediction]:
-    """Predictions aligned with ``metas``; a case missing from the file has no detections."""
-    with open(path) as f:
-        cases = {(c["split"], c["case"]): c for c in json.load(f)["cases"]}
+def load_predictions(path: Union[str, Sequence[str]], metas: Sequence[dict]) -> List[Prediction]:
+    """Predictions aligned with ``metas``; a case missing from the file has no detections.
+
+    Several paths (e.g. the out-of-fold files of a K-fold CV) are joined; they must cover disjoint cases.
+    """
+    cases = {}
+    for p in [path] if isinstance(path, str) else path:
+        with open(p) as f:
+            for c in json.load(f)["cases"]:
+                key = (c["split"], c["case"])
+                assert key not in cases, f"case {key} appears in several files"
+                cases[key] = c
     out = []
     for m in metas:
         c = cases.get((m["split"], m["case"]), {"boxes": [], "scores": []})

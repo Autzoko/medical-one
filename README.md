@@ -74,5 +74,6 @@ IoU > 0.3, duplicate hits are not false positives, and the score is the mean rec
 
 Also reported: COCO-style AP at IoU 0.1 / 0.3 (`ap@t`, IoU 0.1 is the usual nnDetection setting) and a
 stricter in-house protocol on working-space boxes (`froc@t`, `top1_hit@t`, `recall_any@t`; duplicate
-hits count as FPs). `evaluate.py --save-preds` stores per-case predictions; `score_preds.py` rescoring
-them, fusing several files into an ensemble, or exporting the challenge CSV format.
+hits count as FPs). `evaluate.py --save-preds` stores per-case predictions; `score_preds.py` rescores
+them, fuses several files into an ensemble, or exports the challenge CSV format. `compare_methods.py`
+compares methods with case-bootstrap 95% CIs (paired differences to a reference method).
