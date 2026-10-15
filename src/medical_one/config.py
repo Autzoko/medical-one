@@ -94,7 +94,18 @@ def _update(obj: Any, values: Dict[str, Any]) -> None:
         if is_dataclass(current):
             _update(current, value)
         else:
-            setattr(obj, key, value)
+            setattr(obj, key, _coerce(value, current))
+
+
+def _coerce(value: Any, current: Any) -> Any:
+    """Match the default's scalar type; YAML parses e.g. ``1e-4`` (no decimal point) as a string."""
+    if isinstance(current, bool) or not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return value
+    if isinstance(current, float):
+        return float(value)
+    if isinstance(current, int) and isinstance(value, str):
+        return int(value)
+    return value
 
 
 def _parse_override(item: str) -> Dict[str, Any]:
