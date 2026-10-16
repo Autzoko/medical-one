@@ -1,0 +1,22 @@
+# nnDetection baseline (overlay on the base torch env). nnDetection itself is cloned at a pinned commit at
+# run time (scripts/baselines/nndet_pipeline.py); its 2021 pins are kept where torch 2.x allows.
+--extra-index-url https://download.pytorch.org/whl/cu130
+torchvision==0.29.1+cu130  # matches torch 2.14.1+cu130 in the base env; nnDetection imports its 2D NMS
+pytorch_lightning==1.4.2  # nnDetection pin (<=1.4.2); its Trainer arguments predate Lightning 1.5
+torchmetrics==0.7.3  # nnDetection pin (<=0.7.3)
+nnunet==1.7.1  # nnDetection pin; supplies resampling and augmentation helpers
+batchgenerators>=0.25
+scikit-image
+scikit-learn
+pandas
+nevergrad
+medpy
+SimpleITK
+dicom2nifti
+loguru
+hydra-core>=1.2
+GitPython
+matplotlib
+seaborn
+nibabel
+setuptools>=70,<81  # torchmetrics 0.7 imports pkg_resources (removed in 81)
