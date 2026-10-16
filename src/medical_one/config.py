@@ -73,9 +73,10 @@ class EvalConfig:
     max_per_window: int = 100
     fuse_nms: float = 0.1
     max_dets: int = 50
+    deployed_fusion: bool = False  # deployed cross-window step (inclusive NMS, WBF max, top 20) instead of NMS
 
     def postprocess(self) -> Dict[str, Any]:
-        keys = ("top_k", "score_thr", "window_nms", "max_per_window", "fuse_nms", "max_dets")
+        keys = ("top_k", "score_thr", "window_nms", "max_per_window", "fuse_nms", "max_dets", "deployed_fusion")
         return {k: getattr(self, k) for k in keys}
 
 

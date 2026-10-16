@@ -1,0 +1,16 @@
+# Deployed-pipeline reproduction: Ultralytics YOLOv5 v7.0 (cloned at run time), ResNet-34 classifier
+# (overlay on the base torch env)
+--extra-index-url https://download.pytorch.org/whl/cu130
+torchvision==0.29.1+cu130  # matches torch 2.14.1+cu130 in the base env
+opencv-python-headless
+pandas
+seaborn
+matplotlib
+tqdm
+psutil
+thop
+gitpython
+requests
+Pillow
+setuptools<70  # YOLOv5 v7.0 imports pkg_resources
+scikit-learn

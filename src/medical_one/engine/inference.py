@@ -3,8 +3,10 @@
 Follows the deployed per-window logic (sigmoid, top300, score>0.01, NMS IoU>0.05, at most 100,
 strict center keep with margin 22) but crops contiguously and reads every candidate row, i.e.
 without the non-contiguous-buffer and repeated-first-row defects found in the original DLL.
-Cross-window fusion uses NMS instead of the deployed single-source WBF. ``predict_volume_fused``
-adds flip test-time augmentation and multi-model ensembling on top, fused with WBF.
+Cross-window fusion uses NMS instead of the deployed single-source WBF; ``deployed_fusion=True`` instead
+follows the deployed post-processing (inclusive-IoU window NMS, single-source WBF with max score, top 20;
+see ``pipeline.fusion``). ``predict_volume_fused`` adds flip test-time augmentation and multi-model
+ensembling on top, fused with WBF.
 """
 from typing import Sequence, Tuple
 
@@ -31,7 +33,7 @@ def _center_keep(centers: torch.Tensor, sd: int, sw: int) -> torch.Tensor:
 @torch.no_grad()
 def predict_volume(model, volume: np.ndarray, device: str = "cuda", top_k: int = 300, score_thr: float = 0.01,
                    window_nms: float = 0.05, max_per_window: int = 100, fuse_nms: float = 0.1,
-                   max_dets: int = 50) -> Tuple[torch.Tensor, torch.Tensor]:
+                   max_dets: int = 50, deployed_fusion: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
     """Returns (boxes [N,6] corners in working-space voxels, scores [N]) sorted by score."""
     x = normalize(torch.from_numpy(volume).float().to(device))
     scale = torch.tensor(PATCH * 2, device=device, dtype=torch.float)
@@ -46,13 +48,18 @@ def predict_volume(model, volume: np.ndarray, device: str = "cuda", top_k: int =
             scores, boxes = scores[top], boxes[top]
             keep = scores > score_thr
             scores, boxes = scores[keep], boxes[keep]
-            keep = nms_3d(boxes, scores, window_nms)[:max_per_window]
+            keep = nms_3d(boxes, scores, window_nms, inclusive=deployed_fusion)[:max_per_window]
             scores, boxes = scores[keep], boxes[keep]
             keep = _center_keep((boxes[:, :3] + boxes[:, 3:]) / 2, sd, sw)
             offset = torch.tensor([sd, 0, sw, sd, 0, sw], device=device, dtype=torch.float)
             all_boxes.append(boxes[keep] + offset)
             all_scores.append(scores[keep])
     boxes, scores = torch.cat(all_boxes), torch.cat(all_scores)
+    if deployed_fusion:
+        from ..pipeline.fusion import window_fusion
+
+        fb, fs = window_fusion(boxes.double().cpu().numpy(), scores.double().cpu().numpy())
+        return torch.from_numpy(fb).float(), torch.from_numpy(fs).float()
     keep = nms_3d(boxes, scores, fuse_nms)[:max_dets]
     return boxes[keep].cpu(), scores[keep].cpu()
 

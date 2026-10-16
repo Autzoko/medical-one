@@ -27,15 +27,26 @@ def box_iou_giou(a: torch.Tensor, b: torch.Tensor) -> Tuple[torch.Tensor, torch.
     return iou, iou - (hull - union) / hull.clamp(min=1e-7)
 
 
-def nms_3d(boxes: torch.Tensor, scores: torch.Tensor, iou_threshold: float) -> List[int]:
-    """Greedy NMS; suppresses boxes with IoU strictly greater than the threshold."""
+def _inclusive_iou(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """IoU of one box a [6] with b [N,6] counting both end voxels (+1 per axis), as the deployed 3D NMS."""
+    inter = (torch.min(a[3:], b[:, 3:]) - torch.max(a[:3], b[:, :3]) + 1).clamp(min=0).prod(-1)
+    vol = lambda x: (x[..., 3:] - x[..., :3] + 1).prod(-1)  # noqa: E731
+    return inter / (vol(a) + vol(b) - inter)
+
+
+def nms_3d(boxes: torch.Tensor, scores: torch.Tensor, iou_threshold: float, inclusive: bool = False) -> List[int]:
+    """Greedy NMS; suppresses boxes with IoU strictly greater than the threshold. ``inclusive`` uses the
+    deployed (+1) edge lengths."""
     order, keep = scores.argsort(descending=True), []
     while len(order):
         i = order[0]
         keep.append(int(i))
         if len(order) == 1:
             break
-        iou = box_iou_giou(boxes[i][None], boxes[order[1:]])[0][0]
+        if inclusive:
+            iou = _inclusive_iou(boxes[i], boxes[order[1:]])
+        else:
+            iou = box_iou_giou(boxes[i][None], boxes[order[1:]])[0][0]
         order = order[1:][iou <= iou_threshold]
     return keep
 
