@@ -4,6 +4,7 @@ Same working-space volumes, Train/Validation split, patch sampling and augmentat
 DiceCE loss, AdamW, warmup + cosine. Selection on Validation uses the official TDSC score of the default
 box variant (threshold 0.5, max probability). At the end, predictions of best.pt for Validation and Test
 are written for every box variant (preds_<split>_<variant>.json); the variant is chosen on Validation.
+--predict-only skips training and only writes these predictions from an existing best.pt.
 """
 import argparse
 import json
@@ -51,6 +52,7 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--predict-only", action="store_true")
     args = ap.parse_args()
     from monai.losses import DiceCELoss
 
@@ -59,8 +61,9 @@ def main() -> None:
     torch.manual_seed(args.seed)
     run_dir = os.path.join(args.runs_dir, args.name)
     os.makedirs(run_dir, exist_ok=True)
-    with open(os.path.join(run_dir, "args.json"), "w") as f:
-        json.dump(vars(args), f, indent=1)
+    if not args.predict_only:
+        with open(os.path.join(run_dir, "args.json"), "w") as f:
+            json.dump(vars(args), f, indent=1)
     log = open(os.path.join(run_dir, "log.jsonl"), "a")
 
     def write(record, prefix=""):
@@ -74,44 +77,48 @@ def main() -> None:
     splits = load_meta(args.prep_dir)
     model = build_swinunetr(args.feature_size).to(args.device)
     print(f"params {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M", flush=True)
-    loss_fn = DiceCELoss(to_onehot_y=True, softmax=True)
-    opt = torch.optim.AdamW(model.parameters(), args.lr, weight_decay=args.weight_decay)
-    dataset = SegPatchDataset(args.prep_dir, args.masks_dir, splits["Train"], args.iters * args.batch_size, PATCH)
-    loader = torch.utils.data.DataLoader(dataset, args.batch_size, num_workers=args.workers,
-                                         persistent_workers=args.workers > 0)
-    best, start = -1.0, time.time()
-    model.train()
-    for it, (x, y) in enumerate(loader, 1):
-        factor = min(1.0, it / args.warmup) * 0.5 * (1 + math.cos(math.pi * it / args.iters))
-        for g in opt.param_groups:
-            g["lr"] = args.lr * factor
-        x, y = x.to(args.device, non_blocking=True), y.to(args.device, non_blocking=True)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            logits = model(x)
-        loss = loss_fn(logits.float(), y)
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step()
-        if it % 50 == 0:
-            write({"it": it, "loss": round(loss.item(), 4), "lr": opt.param_groups[0]["lr"],
-                   "sec": round(time.time() - start, 1)})
-        if it % args.eval_every == 0 or it == args.iters:
-            probs = predict_split(splits["Validation"])
-            preds = [prob_to_boxes(probs[m["case"]], 0.5, "max") for m in splits["Validation"]]
-            res = compute_metrics(preds, splits["Validation"])
-            res["it"] = it
-            write({"eval": res}, prefix="EVAL ")
-            torch.save({"model": model.state_dict(), "it": it}, os.path.join(run_dir, "last.pt"))
-            if res["tdsc_froc"] > best:
-                best = res["tdsc_froc"]
-                torch.save({"model": model.state_dict(), "it": it, "val": res}, os.path.join(run_dir, "best.pt"))
-            model.train()
+    if not args.predict_only:
+        loss_fn = DiceCELoss(to_onehot_y=True, softmax=True)
+        opt = torch.optim.AdamW(model.parameters(), args.lr, weight_decay=args.weight_decay)
+        dataset = SegPatchDataset(args.prep_dir, args.masks_dir, splits["Train"], args.iters * args.batch_size, PATCH)
+        loader = torch.utils.data.DataLoader(dataset, args.batch_size, num_workers=args.workers,
+                                             persistent_workers=args.workers > 0)
+        best, start = -1.0, time.time()
+        model.train()
+        for it, (x, y) in enumerate(loader, 1):
+            factor = min(1.0, it / args.warmup) * 0.5 * (1 + math.cos(math.pi * it / args.iters))
+            for g in opt.param_groups:
+                g["lr"] = args.lr * factor
+            x, y = x.to(args.device, non_blocking=True), y.to(args.device, non_blocking=True)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                logits = model(x)
+            loss = loss_fn(logits.float(), y)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+            if it % 50 == 0:
+                write({"it": it, "loss": round(loss.item(), 4), "lr": opt.param_groups[0]["lr"],
+                       "sec": round(time.time() - start, 1)})
+            if it % args.eval_every == 0 or it == args.iters:
+                probs = predict_split(splits["Validation"])
+                preds = [prob_to_boxes(probs[m["case"]], 0.5, "max") for m in splits["Validation"]]
+                res = compute_metrics(preds, splits["Validation"])
+                res["it"] = it
+                write({"eval": res}, prefix="EVAL ")
+                torch.save({"model": model.state_dict(), "it": it}, os.path.join(run_dir, "last.pt"))
+                if res["tdsc_froc"] > best:
+                    best = res["tdsc_froc"]
+                    torch.save({"model": model.state_dict(), "it": it, "val": res}, os.path.join(run_dir, "best.pt"))
+                model.train()
     model.load_state_dict(torch.load(os.path.join(run_dir, "best.pt"), weights_only=False)["model"])
     for split in ("Validation", "Test"):
         probs = predict_split(splits[split])
         for variant, (thr, score) in VARIANTS.items():
             preds = [prob_to_boxes(probs[m["case"]], thr, score) for m in splits[split]]
+            if split == "Validation":
+                print(variant, json.dumps({k: compute_metrics(preds, splits[split])[k]
+                                           for k in ("tdsc_froc", "ap@0.1", "top1_hit@0.3")}), flush=True)
             save_predictions(os.path.join(run_dir, f"preds_{split}_{variant}.json"), preds, splits[split],
                              {"model": "monai_swinunetr", "checkpoint": "best.pt", "threshold": thr, "score": score})
     print("done", flush=True)
