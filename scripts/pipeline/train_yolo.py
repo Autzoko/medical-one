@@ -66,9 +66,10 @@ def main() -> None:
     os.makedirs(out_dir, exist_ok=True)
     data = os.path.join(args.local, "yolo_data")
     here = os.path.dirname(os.path.abspath(__file__))
+    repo = clone_yolov5(os.path.join(args.local, "yolov5"))
+    subprocess.run([sys.executable, "-c", "import train, val"], cwd=repo, env=yolo_env(), check=True)  # fail fast
     subprocess.run([sys.executable, os.path.join(here, "make_yolo_data.py"), "--raw", args.raw, "--out", data,
                     "--workers", str(args.workers)], check=True)
-    repo = clone_yolov5(os.path.join(args.local, "yolov5"))
     with open(os.path.join(repo, "data", "hyps", "hyp.scratch-low.yaml")) as f:
         hyp = yaml.safe_load(f)
     hyp.update({"hsv_h": 0.0, "hsv_s": 0.0, "flipud": 0.0, "fliplr": 0.5})

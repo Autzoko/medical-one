@@ -14,3 +14,5 @@ requests
 Pillow
 setuptools>=70,<81  # torch needs a recent one; YOLOv5 v7.0 imports pkg_resources (removed in 81)
 scikit-learn
+ipython  # imported by YOLOv5 v7.0 models/common.py
+tensorboard  # imported by YOLOv5 v7.0 utils/loggers
