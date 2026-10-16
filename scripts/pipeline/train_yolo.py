@@ -21,8 +21,9 @@ import yaml
 YOLOV5_TAG = "v7.0"
 
 
-def patch_amp(repo: str) -> None:
-    """torch.cuda.amp.* is deprecated in recent PyTorch; use torch.amp with the same arguments."""
+def patch_repo(repo: str) -> None:
+    """Port v7.0 to the current stack without changing its behaviour: torch.cuda.amp.* -> torch.amp, and
+    the numpy aliases removed in numpy 2 (np.trapz -> np.trapezoid, np.float -> float)."""
     for root, _, files in os.walk(repo):
         for name in files:
             if not name.endswith(".py"):
@@ -31,6 +32,7 @@ def patch_amp(repo: str) -> None:
             src = open(path).read()
             new = re.sub(r"(?:torch\.cuda\.)?\bamp\.autocast\(([^)=]+)\)", r'torch.amp.autocast("cuda", enabled=\1)', src)
             new = new.replace("torch.cuda.amp.GradScaler(", 'torch.amp.GradScaler("cuda", ')
+            new = new.replace("np.trapz(", "np.trapezoid(").replace(".astype(np.float)", ".astype(float)")
             if new != src:
                 open(path, "w").write(new)
 
@@ -39,7 +41,7 @@ def clone_yolov5(dest: str) -> str:
     if not os.path.isdir(dest):
         subprocess.run(["git", "clone", "-q", "--depth", "1", "--branch", YOLOV5_TAG,
                         "https://github.com/ultralytics/yolov5.git", dest], check=True)
-        patch_amp(dest)
+        patch_repo(dest)
     return dest
 
 
@@ -67,7 +69,9 @@ def main() -> None:
     data = os.path.join(args.local, "yolo_data")
     here = os.path.dirname(os.path.abspath(__file__))
     repo = clone_yolov5(os.path.join(args.local, "yolov5"))
-    subprocess.run([sys.executable, "-c", "import train, val"], cwd=repo, env=yolo_env(), check=True)  # fail fast
+    preflight = ("import numpy as np, train, val; from utils.metrics import ap_per_class; "
+                 "ap_per_class(np.ones((4, 10), bool), np.random.rand(4), np.zeros(4), np.zeros(3), names={0: \"lesion\"})")
+    subprocess.run([sys.executable, "-c", preflight], cwd=repo, env=yolo_env(), check=True)  # fail fast
     subprocess.run([sys.executable, os.path.join(here, "make_yolo_data.py"), "--raw", args.raw, "--out", data,
                     "--workers", str(args.workers)], check=True)
     with open(os.path.join(repo, "data", "hyps", "hyp.scratch-low.yaml")) as f:
