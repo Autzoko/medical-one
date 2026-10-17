@@ -93,8 +93,8 @@ def main() -> None:
     for rel in ("weights/best.pt", "weights/last.pt", "results.csv", "opt.yaml", "hyp.yaml"):
         src = os.path.join(run, rel)
         if os.path.exists(src):
-            shutil.copy(src, os.path.join(out_dir, os.path.basename(rel)))
-    shutil.copy(hyp_path, os.path.join(out_dir, "hyp_tdsc.yaml"))
+            shutil.copyfile(src, os.path.join(out_dir, os.path.basename(rel)))  # CIFS refuses chmod
+    shutil.copyfile(hyp_path, os.path.join(out_dir, "hyp_tdsc.yaml"))
     print("done", flush=True)
 
 
