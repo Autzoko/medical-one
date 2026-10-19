@@ -8,6 +8,11 @@ Unknown in the original and chosen here: COCO-pretrained yolov5m.pt initializati
 the hue/saturation jitter off (channels are neighbouring slices, not colour) and no vertical flip (the
 image rows are ultrasound depth). Data are built on node-local disk (``make_yolo_data.py``); weights,
 results.csv and the options are copied to ``<runs>/<name>``.
+
+Hard negatives (``--negatives``, optional): label rows of class 1 mark regions where an earlier model fired
+falsely. The patched ``ComputeLoss`` removes them from the targets and adds ``hyp['neg']`` (``--neg-weight``)
+x the objectness BCE (target 0) of the anchor cells YOLOv5 would assign to such a box. Without class-1 rows
+the loss is unchanged.
 """
 import argparse
 import os
@@ -21,9 +26,29 @@ import yaml
 YOLOV5_TAG = "v7.0"
 
 
+NEG_EDITS = {  # hard-negative objectness penalty; inert without class-1 labels
+    "utils/loss.py": [
+        ("        tcls, tbox, indices, anchors = self.build_targets(p, targets)  # targets\n",
+         "        neg = targets[targets[:, 1] == 1]  # hard negatives (medical-one)\n"
+         "        targets = targets[targets[:, 1] != 1]\n"
+         "        neg_idx = self.build_targets(p, neg)[2] if len(neg) and self.hyp.get('neg', 0) > 0 else None\n"
+         "        tcls, tbox, indices, anchors = self.build_targets(p, targets)  # targets\n"),
+        ("            obji = self.BCEobj(pi[..., 4], tobj)\n",
+         "            obji = self.BCEobj(pi[..., 4], tobj)\n"
+         "            if neg_idx is not None:  # hard negatives (medical-one)\n"
+         "                nb, na_, nj, ni = neg_idx[i]\n"
+         "                free = tobj[nb, na_, nj, ni] == 0\n"
+         "                if free.any():\n"
+         "                    obji = obji + self.hyp['neg'] * self.BCEobj(pi[nb, na_, nj, ni, 4][free], tobj[nb, na_, nj, ni][free])\n"),
+    ],
+    "train.py": [("    assert mlc < nc, f", "    assert mlc <= nc, f")],  # class nc (= 1) marks hard negatives
+}
+
+
 def patch_repo(repo: str) -> None:
     """Port v7.0 to the current stack without changing its behaviour: torch.cuda.amp.* -> torch.amp, and
-    the numpy aliases removed in numpy 2 (np.trapz -> np.trapezoid, np.float -> float)."""
+    the numpy aliases removed in numpy 2 (np.trapz -> np.trapezoid, np.float -> float). Then the
+    hard-negative edits (``NEG_EDITS``)."""
     for root, _, files in os.walk(repo):
         for name in files:
             if not name.endswith(".py"):
@@ -35,6 +60,14 @@ def patch_repo(repo: str) -> None:
             new = new.replace("np.trapz(", "np.trapezoid(").replace(".astype(np.float)", ".astype(float)")
             if new != src:
                 open(path, "w").write(new)
+    for rel, edits in NEG_EDITS.items():
+        path = os.path.join(repo, rel)
+        src = open(path).read()
+        for old, new in edits:
+            if new not in src:
+                assert src.count(old) == 1, (rel, old)
+                src = src.replace(old, new)
+        open(path, "w").write(src)
 
 
 def clone_yolov5(dest: str) -> str:
@@ -63,6 +96,10 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--weights", default="yolov5m.pt")
     ap.add_argument("--cache", default="ram")
+    ap.add_argument("--cv-folds", type=int, default=0, help="> 0: train on the other folds, validate on --cv-fold")
+    ap.add_argument("--cv-fold", type=int, default=0)
+    ap.add_argument("--negatives", default="", help="working-space hard negatives JSON")
+    ap.add_argument("--neg-weight", type=float, default=0.0, help="hyp['neg']; 0 = negative slices only")
     args = ap.parse_args()
     out_dir = os.path.join(args.runs_dir, args.name)
     os.makedirs(out_dir, exist_ok=True)
@@ -73,10 +110,13 @@ def main() -> None:
                  "ap_per_class(np.ones((4, 10), bool), np.random.rand(4), np.zeros(4), np.zeros(3), names={0: \"lesion\"})")
     subprocess.run([sys.executable, "-c", preflight], cwd=repo, env=yolo_env(), check=True)  # fail fast
     subprocess.run([sys.executable, os.path.join(here, "make_yolo_data.py"), "--raw", args.raw, "--out", data,
-                    "--workers", str(args.workers)], check=True)
+                    "--workers", str(args.workers), "--cv-folds", str(args.cv_folds), "--cv-fold", str(args.cv_fold),
+                    "--negatives", args.negatives], check=True)
     with open(os.path.join(repo, "data", "hyps", "hyp.scratch-low.yaml")) as f:
         hyp = yaml.safe_load(f)
     hyp.update({"hsv_h": 0.0, "hsv_s": 0.0, "flipud": 0.0, "fliplr": 0.5})
+    if args.neg_weight > 0:
+        hyp["neg"] = args.neg_weight
     hyp_path = os.path.join(args.local, "hyp_tdsc.yaml")
     with open(hyp_path, "w") as f:
         yaml.safe_dump(hyp, f)

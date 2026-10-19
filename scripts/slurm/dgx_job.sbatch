@@ -68,7 +68,7 @@ if [ -n "${EXTRAS:-}" ]; then
     export PATH="$XENV/bin:$PATH"
 fi
 
-cp -r "$SHARED/data/prep" "$L/prep"
+[ -n "${NO_PREP:-}" ] || cp -r "$SHARED/data/prep" "$L/prep"  # NO_PREP=1: jobs that never read the volumes
 echo "[$(date)] staged code and data"
 
 cd "$L/code"

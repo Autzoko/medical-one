@@ -15,6 +15,7 @@ from ..data.dataset import PatchDataset, collate
 from ..data.tdsc import load_meta, load_volume, train_val_metas
 from ..evaluation.metrics import compute_metrics
 from ..evaluation.preds import save_predictions
+from ..hardneg import load_negatives
 from ..losses.set_criterion import SetCriterion
 from ..models.detector import ABUSDet3D
 from .inference import predict_volume, predict_volume_fused
@@ -70,7 +71,8 @@ class Trainer:
         self.splits = load_meta(cfg.paths.prep_dir)
         self.model = build_model(cfg).to(device)
         self.ema = copy.deepcopy(self.model).eval().requires_grad_(False) if cfg.train.ema_decay > 0 else None
-        self.criterion = SetCriterion(cfg.loss.w_cls, cfg.loss.w_l1, cfg.loss.w_giou)
+        self.criterion = SetCriterion(cfg.loss.w_cls, cfg.loss.w_l1, cfg.loss.w_giou,
+                                      w_neg=cfg.loss.w_neg, neg_iou=cfg.loss.neg_iou)
         t = cfg.train
         offsets = [p for n, p in self.model.named_parameters() if "sampling_offsets" in n]
         others = [p for n, p in self.model.named_parameters() if "sampling_offsets" not in n]
@@ -116,20 +118,22 @@ class Trainer:
         cfg, t = self.cfg, self.cfg.train
         train_metas, val_metas = train_val_metas(self.splits, cfg.data.train_splits, cfg.data.cv_folds, cfg.data.cv_fold)
         stop = t.stop_iter or t.iters
+        negatives = load_negatives(cfg.data.neg_file) if cfg.data.neg_file else None  # only train cases are read
         dataset = PatchDataset(cfg.paths.prep_dir, train_metas, stop * t.batch_size,
                                cfg.data.pos_prob, cfg.data.margin, scale_range=cfg.data.scale_range,
-                               noise_std=cfg.data.noise_std)
+                               noise_std=cfg.data.noise_std, negatives=negatives, neg_prob=cfg.data.neg_prob)
         loader = torch.utils.data.DataLoader(dataset, t.batch_size, num_workers=cfg.data.num_workers,
                                              collate_fn=collate, persistent_workers=cfg.data.num_workers > 0)
         best, start = -1.0, time.time()
         self.model.train()
-        for it, (x, targets) in enumerate(loader, 1):
+        for it, batch in enumerate(loader, 1):
             self._set_lr(it)
-            x = x.to(self.device, non_blocking=True)
-            targets = [tg.to(self.device) for tg in targets]
+            x = batch[0].to(self.device, non_blocking=True)
+            targets = [tg.to(self.device) for tg in batch[1]]
+            negs = [n.to(self.device) for n in batch[2]] if len(batch) > 2 else None
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=t.amp):
                 dec_outputs, enc_output = self.model(x)
-            loss, last = self.criterion.total(dec_outputs, enc_output, targets)
+            loss, last = self.criterion.total(dec_outputs, enc_output, targets, negs)
             self.opt.zero_grad(set_to_none=True)
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), t.grad_clip)

@@ -32,6 +32,8 @@ class DataConfig:
     train_splits: List[str] = field(default_factory=lambda: ["Train"])  # e.g. [Train, Validation] for a final fit
     cv_folds: int = 0  # > 0: pool Train + Validation and hold out fold ``cv_fold`` of ``cv_folds`` for validation
     cv_fold: int = 0
+    neg_file: str = ""  # hard negatives (``hardneg.save_negatives``); empty = none
+    neg_prob: float = 0.0  # share of patches centred on a hard negative (taken from the random patches)
 
 
 @dataclass
@@ -39,6 +41,8 @@ class LossConfig:
     w_cls: float = 2.0
     w_l1: float = 5.0
     w_giou: float = 2.0
+    w_neg: float = 0.0  # unmatched predictions overlapping a hard negative get (1 + w_neg) x classification loss
+    neg_iou: float = 0.3  # ... when their IoU with it exceeds this
 
 
 @dataclass
