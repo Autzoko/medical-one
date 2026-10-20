@@ -28,6 +28,7 @@ case "$MODE" in
     train) "$ENV/bin/python" scripts/train.py --config configs/abus3d_tdsc.yaml paths.prep_dir="$SHARED/data/prep" \
                paths.runs_dir="$SHARED/runs" train.max_gpu_mem_gb=0 train.amp=false data.num_workers=5 "$@" ;;
     run) "$ENV/bin/python" "$@" ;;
+    sh) PATH="$ENV/bin:$PATH" bash -c "$1" ;;  # a shell command line run with the env's python first on PATH
     *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 echo "[$(date)] done"
