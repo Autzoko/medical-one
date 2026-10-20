@@ -3,11 +3,12 @@
 #   COMMIT=$(git -C $B/medical-one rev-parse HEAD) sbatch -J exp scripts/slurm/jubail_job.sbatch train name=exp ...
 #   COMMIT=... sbatch -J x scripts/slurm/jubail_job.sbatch run scripts/hardneg/mine.py ...
 # V100 has no bf16, so training runs in fp32 (train.amp=false); compare arms only within one hardware.
-# Partition visual (QOS normal): the nvidia QOS caps the user at 12 GPUs, shared with the user's other projects.
+# Partition visual (QOS normal): the nvidia QOS caps the user at 12 GPUs, shared with the user's other projects;
+# visual allows at most 6 CPUs per node, hence 5 data workers.
 #SBATCH -p visual
 #SBATCH --gres=gpu:v100:1
-#SBATCH -c 10
-#SBATCH --mem=60G
+#SBATCH -c 6
+#SBATCH --mem=40G
 #SBATCH -t 12:00:00
 #SBATCH -o /scratch/ll5582/langtian/abus3d/slurm_logs/%x-%j.out
 set -euo pipefail
@@ -25,7 +26,7 @@ cd "$L/code"
 export PYTHONPATH="$L/code/src" PYTHONNOUSERSITE=1 PREP_DIR="$SHARED/data/prep" RUNS_DIR="$SHARED/runs" LOCAL_DIR="$L"
 case "$MODE" in
     train) "$ENV/bin/python" scripts/train.py --config configs/abus3d_tdsc.yaml paths.prep_dir="$SHARED/data/prep" \
-               paths.runs_dir="$SHARED/runs" train.max_gpu_mem_gb=0 train.amp=false "$@" ;;
+               paths.runs_dir="$SHARED/runs" train.max_gpu_mem_gb=0 train.amp=false data.num_workers=5 "$@" ;;
     run) "$ENV/bin/python" "$@" ;;
     *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
