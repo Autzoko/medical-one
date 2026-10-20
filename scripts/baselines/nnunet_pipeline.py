@@ -95,7 +95,7 @@ def main() -> None:
            "nnUNet_n_proc_DA": "12"}
     os.environ.update(env)
     splits = load_meta(args.prep_dir)
-    trainer = f"nnUNetTrainer_{args.epochs}epochs"
+    trainer = "nnUNetTrainer" if args.epochs == 1000 else f"nnUNetTrainer_{args.epochs}epochs"  # 1000 = the default
 
     export(args.prep_dir, args.masks_dir, env["nnUNet_raw"], splits)
     run(["nnUNetv2_plan_and_preprocess", "-d", "501", "-c", "3d_fullres", "-np", str(args.processes),
