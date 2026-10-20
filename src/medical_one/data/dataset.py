@@ -35,13 +35,17 @@ class PatchDataset(torch.utils.data.Dataset):
                  negatives: Optional[Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray]]] = None,
                  neg_prob: float = 0.0):
         self.cases = [(load_volume(prep_dir, m), np.asarray(m["box"], np.float32)) for m in metas]
+        self.keys = [(m["split"], m["case"]) for m in metas]
         self.length, self.pos_prob, self.margin, self.augment = length, pos_prob, margin, augment
         self.scale_range, self.noise_std = scale_range, noise_std
         assert neg_prob <= 1 - pos_prob + 1e-9, "negative patches are taken from the random share"
-        self.negatives = None if negatives is None else [
-            np.asarray(negatives.get((m["split"], m["case"]), (np.zeros((0, 6)), None))[0], np.float32).reshape(-1, 6)
-            for m in metas]
+        self.set_negatives(negatives)
         self.neg_prob = neg_prob
+
+    def set_negatives(self, negatives) -> None:
+        """Replace the hard negatives (workers forked afterwards see the new list)."""
+        self.negatives = None if negatives is None else [
+            np.asarray(negatives.get(k, (np.zeros((0, 6)), None))[0], np.float32).reshape(-1, 6) for k in self.keys]
         self.scale = np.asarray(PATCH * 2, np.float32)
 
     def __len__(self) -> int:

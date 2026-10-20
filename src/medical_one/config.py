@@ -34,6 +34,10 @@ class DataConfig:
     cv_fold: int = 0
     neg_file: str = ""  # hard negatives (``hardneg.save_negatives``); empty = none
     neg_prob: float = 0.0  # share of patches centred on a hard negative (taken from the random patches)
+    neg_refresh_every: int = 0  # > 0: every N iterations re-mine negatives with the current (EMA) model
+    neg_min_score: float = 0.3  # online mining: score threshold, boxes per case, keep earlier negatives
+    neg_top: int = 5
+    neg_keep_old: bool = True
 
 
 @dataclass

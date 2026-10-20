@@ -15,7 +15,7 @@ from ..data.dataset import PatchDataset, collate
 from ..data.tdsc import load_meta, load_volume, train_val_metas
 from ..evaluation.metrics import compute_metrics
 from ..evaluation.preds import save_predictions
-from ..hardneg import load_negatives
+from ..hardneg import load_negatives, mine, save_negatives, union
 from ..losses.set_criterion import SetCriterion
 from ..models.detector import ABUSDet3D
 from .inference import predict_volume, predict_volume_fused
@@ -119,44 +119,75 @@ class Trainer:
         train_metas, val_metas = train_val_metas(self.splits, cfg.data.train_splits, cfg.data.cv_folds, cfg.data.cv_fold)
         stop = t.stop_iter or t.iters
         negatives = load_negatives(cfg.data.neg_file) if cfg.data.neg_file else None  # only train cases are read
+        every = cfg.data.neg_refresh_every
+        if every > 0 and negatives is None:
+            negatives = {}
         dataset = PatchDataset(cfg.paths.prep_dir, train_metas, stop * t.batch_size,
                                cfg.data.pos_prob, cfg.data.margin, scale_range=cfg.data.scale_range,
                                noise_std=cfg.data.noise_std, negatives=negatives, neg_prob=cfg.data.neg_prob)
-        loader = torch.utils.data.DataLoader(dataset, t.batch_size, num_workers=cfg.data.num_workers,
-                                             collate_fn=collate, persistent_workers=cfg.data.num_workers > 0)
-        best, start = -1.0, time.time()
+        # Online bootstrapping: the run is cut into segments; after each, the current model re-mines its own
+        # false positives on the training cases and the next segment's loader (fresh workers) samples them.
+        bounds = [b for b in range(every, stop, every)] + [stop] if every > 0 else [stop]
+        best, start, it = -1.0, time.time(), 0
         self.model.train()
-        for it, batch in enumerate(loader, 1):
-            self._set_lr(it)
-            x = batch[0].to(self.device, non_blocking=True)
-            targets = [tg.to(self.device) for tg in batch[1]]
-            negs = [n.to(self.device) for n in batch[2]] if len(batch) > 2 else None
-            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=t.amp):
-                dec_outputs, enc_output = self.model(x)
-            loss, last = self.criterion.total(dec_outputs, enc_output, targets, negs)
-            self.opt.zero_grad(set_to_none=True)
-            loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), t.grad_clip)
-            self.opt.step()
-            self._update_ema()
-            if it % t.log_every == 0:
-                self._log({"it": it, "loss": round(loss.item(), 4), "last": round(last.item(), 4),
-                           "gnorm": round(grad_norm.item(), 3), "lr": self.opt.param_groups[0]["lr"],
-                           "sec": round(time.time() - start, 1)})
-            if it % t.eval_every == 0 or it == stop:
-                eval_model = self.ema if self.ema is not None else self.model
-                preds = predict_split(eval_model, cfg, val_metas, self.device)
-                res = compute_metrics(preds, val_metas, cfg.eval.iou_thrs)
-                res["it"] = it
-                self._log({"eval": res}, prefix="EVAL ")
-                self._save("last.pt", it)
-                if res[cfg.eval.select_metric] > best:
-                    best = res[cfg.eval.select_metric]
-                    self._save("best.pt", it, val=res)
-                    save_predictions(os.path.join(cfg.run_dir, "preds_val_best.json"), preds, val_metas,
-                                     {"checkpoint": "best.pt", "it": it})
+        for seg_end in bounds:
+            dataset.length = (seg_end - it) * t.batch_size
+            loader = torch.utils.data.DataLoader(dataset, t.batch_size, num_workers=cfg.data.num_workers,
+                                                 collate_fn=collate, persistent_workers=cfg.data.num_workers > 0)
+            for batch in loader:
+                it += 1
+                best = self._step(it, batch, stop, best, start, val_metas)
+            if seg_end < stop:
+                negatives = self._refresh_negatives(it, train_metas, negatives)
+                dataset.set_negatives(negatives)
         if cfg.train.predict_test:
             self._predict_test()
+
+    def _refresh_negatives(self, it: int, train_metas: List[dict], negatives):
+        """In-sample mining with the evaluation model (EMA if enabled), merged with earlier negatives."""
+        cfg, t0 = self.cfg, time.time()
+        model = self.ema if self.ema is not None else self.model
+        preds = predict_split(model, cfg, train_metas, self.device)
+        new = mine(preds, train_metas, cfg.data.neg_min_score, cfg.data.neg_top)
+        merged = union(negatives, new, top=2 * cfg.data.neg_top) if cfg.data.neg_keep_old and negatives else new
+        save_negatives(os.path.join(cfg.run_dir, f"negatives_it{it}.json"), merged, {"it": it})
+        n_new = [len(new[(m["split"], m["case"])][1]) for m in train_metas]
+        n_all = [len(merged.get((m["split"], m["case"]), (None, []))[1]) for m in train_metas]
+        self._log({"it": it, "neg_refresh": {"mined": int(sum(n_new)), "cases_mined": round(float(np.mean(
+            [n > 0 for n in n_new])), 3), "total": int(sum(n_all)), "sec": round(time.time() - t0, 1)}})
+        return merged
+
+    def _step(self, it: int, batch, stop: int, best: float, start: float, val_metas: List[dict]) -> float:
+        cfg, t = self.cfg, self.cfg.train
+        self._set_lr(it)
+        x = batch[0].to(self.device, non_blocking=True)
+        targets = [tg.to(self.device) for tg in batch[1]]
+        negs = [n.to(self.device) for n in batch[2]] if len(batch) > 2 else None
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=t.amp):
+            dec_outputs, enc_output = self.model(x)
+        loss, last = self.criterion.total(dec_outputs, enc_output, targets, negs)
+        self.opt.zero_grad(set_to_none=True)
+        loss.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), t.grad_clip)
+        self.opt.step()
+        self._update_ema()
+        if it % t.log_every == 0:
+            self._log({"it": it, "loss": round(loss.item(), 4), "last": round(last.item(), 4),
+                       "gnorm": round(grad_norm.item(), 3), "lr": self.opt.param_groups[0]["lr"],
+                       "sec": round(time.time() - start, 1)})
+        if it % t.eval_every == 0 or it == stop:
+            eval_model = self.ema if self.ema is not None else self.model
+            preds = predict_split(eval_model, cfg, val_metas, self.device)
+            res = compute_metrics(preds, val_metas, cfg.eval.iou_thrs)
+            res["it"] = it
+            self._log({"eval": res}, prefix="EVAL ")
+            self._save("last.pt", it)
+            if res[cfg.eval.select_metric] > best:
+                best = res[cfg.eval.select_metric]
+                self._save("best.pt", it, val=res)
+                save_predictions(os.path.join(cfg.run_dir, "preds_val_best.json"), preds, val_metas,
+                                 {"checkpoint": "best.pt", "it": it})
+        return best
 
     @torch.no_grad()
     def _predict_test(self) -> None:
