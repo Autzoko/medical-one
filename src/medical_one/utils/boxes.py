@@ -12,25 +12,30 @@ def xyxy_to_cxcyczwhd(b: torch.Tensor) -> torch.Tensor:
     return torch.cat([(b[..., :3] + b[..., 3:]) / 2, b[..., 3:] - b[..., :3]], -1)
 
 
+def _prod3(x: torch.Tensor) -> torch.Tensor:
+    """x[..., 0] * x[..., 1] * x[..., 2]; avoids the torch.prod CUDA kernel, which fails on V100 with torch 2.14."""
+    return x[..., 0] * x[..., 1] * x[..., 2]
+
+
 def box_volume(b: torch.Tensor) -> torch.Tensor:
-    return (b[..., 3:] - b[..., :3]).clamp(min=0).prod(-1)
+    return _prod3((b[..., 3:] - b[..., :3]).clamp(min=0))
 
 
 def box_iou_giou(a: torch.Tensor, b: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Pairwise IoU and GIoU between corner boxes a [N,6] and b [M,6]."""
     lo = torch.max(a[:, None, :3], b[None, :, :3])
     hi = torch.min(a[:, None, 3:], b[None, :, 3:])
-    inter = (hi - lo).clamp(min=0).prod(-1)
+    inter = _prod3((hi - lo).clamp(min=0))
     union = box_volume(a)[:, None] + box_volume(b)[None] - inter
     iou = inter / union.clamp(min=1e-7)
-    hull = (torch.max(a[:, None, 3:], b[None, :, 3:]) - torch.min(a[:, None, :3], b[None, :, :3])).clamp(min=0).prod(-1)
+    hull = _prod3((torch.max(a[:, None, 3:], b[None, :, 3:]) - torch.min(a[:, None, :3], b[None, :, :3])).clamp(min=0))
     return iou, iou - (hull - union) / hull.clamp(min=1e-7)
 
 
 def _inclusive_iou(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """IoU of one box a [6] with b [N,6] counting both end voxels (+1 per axis), as the deployed 3D NMS."""
-    inter = (torch.min(a[3:], b[:, 3:]) - torch.max(a[:3], b[:, :3]) + 1).clamp(min=0).prod(-1)
-    vol = lambda x: (x[..., 3:] - x[..., :3] + 1).prod(-1)  # noqa: E731
+    inter = _prod3((torch.min(a[3:], b[:, 3:]) - torch.max(a[:3], b[:, :3]) + 1).clamp(min=0))
+    vol = lambda x: _prod3(x[..., 3:] - x[..., :3] + 1)  # noqa: E731
     return inter / (vol(a) + vol(b) - inter)
 
 
