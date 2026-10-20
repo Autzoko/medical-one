@@ -3,7 +3,8 @@
 #   COMMIT=$(git -C $B/medical-one rev-parse HEAD) sbatch -J exp scripts/slurm/jubail_job.sbatch train name=exp ...
 #   COMMIT=... sbatch -J x scripts/slurm/jubail_job.sbatch run scripts/hardneg/mine.py ...
 # V100 has no bf16, so training runs in fp32 (train.amp=false); compare arms only within one hardware.
-#SBATCH -p nvidia
+# Partition visual (QOS normal): the nvidia QOS caps the user at 12 GPUs, shared with the user's other projects.
+#SBATCH -p visual
 #SBATCH --gres=gpu:v100:1
 #SBATCH -c 10
 #SBATCH --mem=60G

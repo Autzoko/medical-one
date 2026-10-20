@@ -13,7 +13,7 @@ git pull -q
 C=$(git rev-parse HEAD)
 S=/scratch/ll5582/langtian/abus3d
 H=$S/hardneg
-LANES=${LANES:-10}
+LANES=${LANES:-8}  # visual partition, QOS normal (keeps the nvidia QOS free for other projects)
 COMMON=(data.cv_folds=5 data.scale_range=0.2 data.noise_std=8.0 train.iters=10000 train.eval_every=500)
 NEG=(data.neg_prob=0.2 loss.w_neg=1.0)
 LIST=$H/jobs_jubail.txt
