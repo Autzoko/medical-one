@@ -86,38 +86,47 @@ def main() -> None:
     ap.add_argument("--masks-dir", required=True, help="working-space masks (preprocess_tdsc.py --masks-only)")
     ap.add_argument("--local-dir", default=os.environ.get("LOCAL_DIR", "/tmp"))
     ap.add_argument("--processes", type=int, default=8)
+    ap.add_argument("--trainer", default="", help="nnU-Net trainer class (default: from --epochs); "
+                    "nnUNetTrainer_MedNeXt* uses medical_one.baselines.nnunet_mednext")
     args = ap.parse_args()
     run_dir = os.path.join(args.runs_dir, args.name)
     os.makedirs(run_dir, exist_ok=True)
     env = {"nnUNet_raw": os.path.join(args.local_dir, "nnUNet_raw"),
            "nnUNet_preprocessed": os.path.join(args.local_dir, "nnUNet_preprocessed"),
            "nnUNet_results": os.path.join(run_dir, "nnUNet_results"), "nnUNet_compile": "false",
-           "nnUNet_n_proc_DA": "12"}
+           "nnUNet_n_proc_DA": os.environ.get("nnUNet_n_proc_DA", "12")}
     os.environ.update(env)
     splits = load_meta(args.prep_dir)
-    trainer = "nnUNetTrainer" if args.epochs == 1000 else f"nnUNetTrainer_{args.epochs}epochs"  # 1000 = the default
+    trainer = args.trainer or ("nnUNetTrainer" if args.epochs == 1000 else f"nnUNetTrainer_{args.epochs}epochs")
+    plans = "nnUNetPlans"
 
-    export(args.prep_dir, args.masks_dir, env["nnUNet_raw"], splits)
-    run(["nnUNetv2_plan_and_preprocess", "-d", "501", "-c", "3d_fullres", "-np", str(args.processes),
-         "--verify_dataset_integrity"])
+    if not os.path.exists(os.path.join(env["nnUNet_preprocessed"], DATASET, "nnUNetPlans.json")):
+        export(args.prep_dir, args.masks_dir, env["nnUNet_raw"], splits)
+        run(["nnUNetv2_plan_and_preprocess", "-d", "501", "-c", "3d_fullres", "-np", str(args.processes),
+             "--verify_dataset_integrity"])
     with open(os.path.join(env["nnUNet_preprocessed"], DATASET, "splits_final.json"), "w") as f:
         json.dump([{"train": [case_id(m) for m in splits["Train"]],
                     "val": [case_id(m) for m in splits["Validation"]]}], f)
-    fold_dir = os.path.join(env["nnUNet_results"], DATASET, f"{trainer}__nnUNetPlans__3d_fullres", "fold_0")
+    if "MedNeXt" in trainer:
+        from medical_one.baselines import nnunet_mednext
+
+        print("installed", nnunet_mednext.install(), flush=True)
+        plans = nnunet_mednext.mednext_plans(os.path.join(env["nnUNet_preprocessed"], DATASET))
+    fold_dir = os.path.join(env["nnUNet_results"], DATASET, f"{trainer}__{plans}__3d_fullres", "fold_0")
     if not os.path.exists(os.path.join(fold_dir, "checkpoint_final.pth")):
         resume = ["--c"] if os.path.exists(os.path.join(fold_dir, "checkpoint_latest.pth")) else []
-        run(["nnUNetv2_train", "501", "3d_fullres", "0", "-tr", trainer] + resume)
+        run(["nnUNetv2_train", "501", "3d_fullres", "0", "-tr", trainer, "-p", plans] + resume)
     for split, sub in (("Validation", "imagesVal"), ("Test", "imagesTs")):
         out = os.path.join(run_dir, f"seg_{split}")
         if len([f for f in os.listdir(out) if f.endswith(".npz")] if os.path.isdir(out) else []) < len(splits[split]):
             run(["nnUNetv2_predict", "-i", os.path.join(env["nnUNet_raw"], DATASET, sub), "-o", out, "-d", "501",
-                 "-c", "3d_fullres", "-f", "0", "-tr", trainer, "--save_probabilities"])
+                 "-c", "3d_fullres", "-f", "0", "-tr", trainer, "-p", plans, "--save_probabilities"])
         probs = {m["case"]: load_prob(os.path.join(out, f"{case_id(m)}.npz"), os.path.join(out, f"{case_id(m)}.nii.gz"))
                  for m in splits[split]}
         for variant, (thr, score) in VARIANTS.items():
             preds = [prob_to_boxes(probs[m["case"]], thr, score) for m in splits[split]]
             save_predictions(os.path.join(run_dir, f"preds_{split}_{variant}.json"), preds, splits[split],
-                             {"model": "nnunet_3d_fullres", "trainer": trainer, "threshold": thr, "score": score})
+                             {"model": "nnunet_3d_fullres", "trainer": trainer, "plans": plans, "threshold": thr, "score": score})
     print("done", flush=True)
 
 
