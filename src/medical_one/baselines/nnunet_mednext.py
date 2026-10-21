@@ -68,8 +68,9 @@ class _AlwaysDS(nn.Module):
 class nnUNetTrainer_MedNeXtB(nnUNetTrainer):
     variant = "B"
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):  # explicit: nnU-Net records locals()
+        super().__init__(plans, configuration, fold, dataset_json, device)
         self.initial_lr = 1e-3
         self.weight_decay = 1e-4
         patch = self.configuration_manager.patch_size
@@ -98,8 +99,9 @@ class nnUNetTrainer_MedNeXtS(nnUNetTrainer_MedNeXtB):
 
 
 class nnUNetTrainer_MedNeXtB_250epochs(nnUNetTrainer_MedNeXtB):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):  # explicit: nnU-Net records locals()
+        super().__init__(plans, configuration, fold, dataset_json, device)
         self.num_epochs = 250
 
 
