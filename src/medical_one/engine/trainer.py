@@ -17,24 +17,42 @@ from ..evaluation.metrics import compute_metrics
 from ..evaluation.preds import save_predictions
 from ..hardneg import load_negatives, mine, save_negatives, union
 from ..losses.set_criterion import SetCriterion
+from ..models.center_detr import CenterDETR3D
+from ..models.center_head import CenterLoss
 from ..models.detector import ABUSDet3D
 from .inference import predict_volume, predict_volume_fused
 
 
-def build_model(cfg: Config) -> ABUSDet3D:
+def build_model(cfg: Config) -> Union[ABUSDet3D, CenterDETR3D]:
     m = cfg.model
+    if m.arch == "center_detr":
+        return CenterDETR3D(norm=m.norm, dim=m.dim, num_queries=m.num_queries, drop=m.dropout,
+                            center_hidden=m.center_hidden)
+    assert m.arch == "detr", m.arch
     return ABUSDet3D(norm=m.norm, dim=m.dim, num_queries=m.num_queries, drop=m.dropout)
 
 
+def heads(cfg: Config) -> List[str]:
+    """Experts whose boxes are evaluated and saved: expert 2 ("detr") first, it drives checkpoint selection."""
+    return ["detr", "center"] if cfg.model.arch == "center_detr" else ["detr"]
+
+
+def _suffix(head: str) -> str:
+    return "" if head == "detr" else f"_{head}"
+
+
 @torch.no_grad()
-def predict_split(model: Union[ABUSDet3D, Sequence[ABUSDet3D]], cfg: Config, metas: List[dict],
-                  device: str) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-    """A single model without TTA uses plain sliding-window NMS; otherwise predictions are WBF-fused."""
+def predict_split(model, cfg: Config, metas: List[dict], device: str,
+                  head: str = "") -> List[Tuple[torch.Tensor, torch.Tensor]]:
+    """A single model without TTA uses plain sliding-window NMS; otherwise predictions are WBF-fused.
+    ``head`` overrides ``cfg.eval.head`` (which expert of a CenterDETR3D)."""
     models = list(model) if isinstance(model, (list, tuple)) else [model]
     modes = [m.training for m in models]
     for m in models:
         m.eval()
     post = cfg.eval.postprocess()
+    if head:
+        post["head"] = head
     preds = []
     for meta in metas:
         volume = load_volume(cfg.paths.prep_dir, meta)
@@ -73,6 +91,11 @@ class Trainer:
         self.ema = copy.deepcopy(self.model).eval().requires_grad_(False) if cfg.train.ema_decay > 0 else None
         self.criterion = SetCriterion(cfg.loss.w_cls, cfg.loss.w_l1, cfg.loss.w_giou,
                                       w_neg=cfg.loss.w_neg, neg_iou=cfg.loss.neg_iou)
+        lc = cfg.loss
+        self.center_loss = None
+        if cfg.model.arch == "center_detr":
+            self.center_loss = CenterLoss(lc.w_center_heat, lc.w_center_size, lc.w_center_offset, lc.w_center_giou,
+                                          lc.center_sigma_ratio, lc.center_min_sigma)
         t = cfg.train
         offsets = [p for n, p in self.model.named_parameters() if "sampling_offsets" in n]
         others = [p for n, p in self.model.named_parameters() if "sampling_offsets" not in n]
@@ -164,29 +187,42 @@ class Trainer:
         targets = [tg.to(self.device) for tg in batch[1]]
         negs = [n.to(self.device) for n in batch[2]] if len(batch) > 2 else None
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=t.amp):
-            dec_outputs, enc_output = self.model(x)
-        loss, last = self.criterion.total(dec_outputs, enc_output, targets, negs)
+            outputs = self.model(x)
+        loss, last = self.criterion.total(outputs[0], outputs[1], targets, negs)
+        center_parts = None
+        if self.center_loss is not None:
+            center, center_parts = self.center_loss(outputs[2], targets)
+            loss = loss + center
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), t.grad_clip)
         self.opt.step()
         self._update_ema()
         if it % t.log_every == 0:
-            self._log({"it": it, "loss": round(loss.item(), 4), "last": round(last.item(), 4),
-                       "gnorm": round(grad_norm.item(), 3), "lr": self.opt.param_groups[0]["lr"],
-                       "sec": round(time.time() - start, 1)})
+            rec = {"it": it, "loss": round(loss.item(), 4), "last": round(last.item(), 4),
+                   "gnorm": round(grad_norm.item(), 3), "lr": self.opt.param_groups[0]["lr"],
+                   "sec": round(time.time() - start, 1)}
+            if center_parts is not None:
+                rec["center"] = {k: round(v.item(), 4) for k, v in center_parts.items()}
+            self._log(rec)
         if it % t.eval_every == 0 or it == stop:
             eval_model = self.ema if self.ema is not None else self.model
-            preds = predict_split(eval_model, cfg, val_metas, self.device)
-            res = compute_metrics(preds, val_metas, cfg.eval.iou_thrs)
+            preds = {h: predict_split(eval_model, cfg, val_metas, self.device, head=h) for h in heads(cfg)}
+            res = compute_metrics(preds["detr"], val_metas, cfg.eval.iou_thrs)
             res["it"] = it
             self._log({"eval": res}, prefix="EVAL ")
+            for h in heads(cfg)[1:]:
+                r = compute_metrics(preds[h], val_metas, cfg.eval.iou_thrs)
+                self._log({"eval_head": h, "it": it, **{k: r[k] for k in ("tdsc_froc", "tdsc_sens", "ap@0.3",
+                                                                          "tdsc_max_recall", "top1_hit@0.3")}},
+                          prefix="EVAL ")
             self._save("last.pt", it)
-            if res[cfg.eval.select_metric] > best:
+            if res[cfg.eval.select_metric] > best:  # selection: expert 2 on Validation only
                 best = res[cfg.eval.select_metric]
                 self._save("best.pt", it, val=res)
-                save_predictions(os.path.join(cfg.run_dir, "preds_val_best.json"), preds, val_metas,
-                                 {"checkpoint": "best.pt", "it": it})
+                for h, p in preds.items():
+                    save_predictions(os.path.join(cfg.run_dir, f"preds_val_best{_suffix(h)}.json"), p, val_metas,
+                                     {"checkpoint": "best.pt", "it": it, "head": h})
         return best
 
     @torch.no_grad()
@@ -194,8 +230,10 @@ class Trainer:
         """Test-set predictions of best.pt and last.pt, saved for later scoring (never used for selection)."""
         model = build_model(self.cfg).to(self.device)
         metas = self.splits["Test"]
-        for ckpt, out in (("best.pt", "preds_Test.json"), ("last.pt", "preds_Test_last.json")):
+        for ckpt, out in (("best.pt", "preds_Test"), ("last.pt", "preds_Test_last")):
             state = torch.load(os.path.join(self.cfg.run_dir, ckpt), map_location=self.device, weights_only=False)
             model.load_state_dict(state["model"])
-            save_predictions(os.path.join(self.cfg.run_dir, out), predict_split(model, self.cfg, metas, self.device),
-                             metas, {"checkpoint": ckpt, "it": state["it"]})
+            for h in heads(self.cfg):
+                save_predictions(os.path.join(self.cfg.run_dir, f"{out}{_suffix(h)}.json"),
+                                 predict_split(model, self.cfg, metas, self.device, head=h),
+                                 metas, {"checkpoint": ckpt, "it": state["it"], "head": h})

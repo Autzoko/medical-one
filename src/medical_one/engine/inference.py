@@ -33,8 +33,10 @@ def _center_keep(centers: torch.Tensor, sd: int, sw: int) -> torch.Tensor:
 @torch.no_grad()
 def predict_volume(model, volume: np.ndarray, device: str = "cuda", top_k: int = 300, score_thr: float = 0.01,
                    window_nms: float = 0.05, max_per_window: int = 100, fuse_nms: float = 0.1,
-                   max_dets: int = 50, deployed_fusion: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Returns (boxes [N,6] corners in working-space voxels, scores [N]) sorted by score."""
+                   max_dets: int = 50, deployed_fusion: bool = False,
+                   head: str = "detr") -> Tuple[torch.Tensor, torch.Tensor]:
+    """Returns (boxes [N,6] corners in working-space voxels, scores [N]) sorted by score. ``head`` selects the
+    expert of a ``CenterDETR3D`` ("detr" or "center"); other models only have "detr"."""
     x = normalize(torch.from_numpy(volume).float().to(device))
     scale = torch.tensor(PATCH * 2, device=device, dtype=torch.float)
     all_boxes, all_scores = [], []
@@ -42,7 +44,7 @@ def predict_volume(model, volume: np.ndarray, device: str = "cuda", top_k: int =
         for sw in WINDOW_STARTS:
             patch = x[sd:sd + PATCH[0], :, sw:sw + PATCH[2]].contiguous()[None, None]
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.startswith("cuda")):
-                logits, corners = model.predict(patch)
+                logits, corners = model.predict(patch) if head == "detr" else model.predict(patch, head=head)
             scores, boxes = logits[0, :, 0].float().sigmoid(), corners[0].float() * scale
             top = scores.topk(min(top_k, len(scores))).indices
             scores, boxes = scores[top], boxes[top]

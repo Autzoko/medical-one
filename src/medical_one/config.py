@@ -16,10 +16,12 @@ class PathsConfig:
 
 @dataclass
 class ModelConfig:
+    arch: str = "detr"  # "detr": ABUSDet3D; "center_detr": expert 1 (center heat map) + expert 2 (DETR), CenterDETR3D
     norm: str = "gn"
     dim: int = 192
     num_queries: int = 900
     dropout: float = 0.0
+    center_hidden: int = 96  # center_detr: channels of the center-head branches
 
 
 @dataclass
@@ -47,6 +49,13 @@ class LossConfig:
     w_giou: float = 2.0
     w_neg: float = 0.0  # unmatched predictions overlapping a hard negative get (1 + w_neg) x classification loss
     neg_iou: float = 0.3  # ... when their IoU with it exceeds this
+    # center_detr: expert-1 loss (penalty-reduced focal heat + L1 log size + L1 offset + GIoU at center cells)
+    w_center_heat: float = 1.0
+    w_center_size: float = 1.0
+    w_center_offset: float = 1.0
+    w_center_giou: float = 1.0
+    center_sigma_ratio: float = 0.1667  # Gaussian sigma per axis = ratio x box size (cells), at least min_sigma
+    center_min_sigma: float = 0.5
 
 
 @dataclass
@@ -82,9 +91,11 @@ class EvalConfig:
     fuse_nms: float = 0.1
     max_dets: int = 50
     deployed_fusion: bool = False  # deployed cross-window step (inclusive NMS, WBF max, top 20) instead of NMS
+    head: str = "detr"  # center_detr models: which expert's boxes to predict ("detr" = expert 2, "center" = expert 1)
 
     def postprocess(self) -> Dict[str, Any]:
-        keys = ("top_k", "score_thr", "window_nms", "max_per_window", "fuse_nms", "max_dets", "deployed_fusion")
+        keys = ("top_k", "score_thr", "window_nms", "max_per_window", "fuse_nms", "max_dets", "deployed_fusion",
+                "head")
         return {k: getattr(self, k) for k in keys}
 
 

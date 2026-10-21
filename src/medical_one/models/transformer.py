@@ -6,7 +6,7 @@ FFN 768, TopK 900 encoder proposals, inverse-sigmoid box refinement, ``class_emb
 proposal size prior ``0.05 * 2**level``, and ``pix_trans`` adding gathered memory to the query.
 """
 import math
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -132,7 +132,11 @@ class Transformer3D(nn.Module):
             self._static_cache[key] = (pos, torch.cat(ref), props_unact, valid)
         return self._static_cache[key]
 
-    def forward(self, feats: List[torch.Tensor]) -> Tuple[List[Output], Output]:
+    def forward(self, feats: List[torch.Tensor], query_index: Optional[torch.Tensor] = None,
+                query_ref: Optional[torch.Tensor] = None) -> Tuple[List[Output], Output]:
+        """``query_index`` [B,K] (positions in the flattened level-0 grid) and ``query_ref`` [B,K,6] (center/size
+        boxes in (0,1)) replace the encoder top-K proposals as decoder queries (proposals of an external dense
+        head); both are treated as constants, like the encoder proposals."""
         shapes = [tuple(f.shape[2:]) for f in feats]
         B = feats[0].shape[0]
         pos_levels, ref, props_unact, valid = self._static(shapes, feats[0].device)
@@ -148,8 +152,11 @@ class Transformer3D(nn.Module):
         out_mem = self.enc_output_norm(self.enc_output(memory.masked_fill(~valid[None, :, None], 0)))
         enc_logits = self.decoder.class_embed[-1](out_mem)
         enc_unact = self.decoder.bbox_embed[-1](out_mem) + props_unact[None]
-        topk = enc_logits[..., 0].float().masked_fill(~valid[None], float("-inf")).topk(self.num_queries, dim=1)[1]
-        ref_q = torch.gather(enc_unact, 1, topk[..., None].expand(-1, -1, 6)).detach().sigmoid()
+        if query_index is None:
+            topk = enc_logits[..., 0].float().masked_fill(~valid[None], float("-inf")).topk(self.num_queries, dim=1)[1]
+            ref_q = torch.gather(enc_unact, 1, topk[..., None].expand(-1, -1, 6)).detach().sigmoid()
+        else:
+            topk, ref_q = query_index, query_ref.detach().float()
         query_pos, query = self.pos_trans_norm(
             self.pos_trans(sine_embed(ref_q, 2 * self.dim // 6).to(src.dtype))).split(self.dim, -1)
         topk_mem = torch.gather(out_mem, 1, topk[..., None].expand(-1, -1, self.dim)).detach()

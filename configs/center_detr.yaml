@@ -1,0 +1,43 @@
+# Expert 1 (dense center heat map, boxes only) + expert 2 (two-stage deformable DETR seeded by expert-1 peaks),
+# one network (CenterDETR3D), official TDSC split: train = Train, checkpoint selection on Validation (expert 2,
+# official FROC), Test predicted for both experts at the end. Data augmentation = the aug setting of earlier runs.
+name: center_detr
+paths:
+  tdsc_root: ~/data-001/langtian/data/medical-image/ABUS_TDSC
+  extracted_train: ~/langtian/abus3d_repro/data/raw   # parent of the unzipped Train/ (the release zips it)
+  prep_dir: ~/langtian/abus3d_repro/data/prep
+  runs_dir: ~/langtian/abus3d_repro/runs
+model:
+  arch: center_detr
+  norm: gn          # BN was folded at export; GN is safer at batch size 2
+  dim: 192
+  num_queries: 300   # expert-1 peaks seed the decoder
+  dropout: 0.0
+data:
+  pos_prob: 0.7
+  margin: 24
+  num_workers: 8
+  scale_range: 0.2
+  noise_std: 8.0
+  train_splits: [Train]
+loss:
+  w_cls: 2.0
+  w_l1: 5.0
+  w_giou: 2.0
+train:
+  iters: 20000
+  batch_size: 2
+  lr: 2.0e-4
+  offset_lr_mult: 0.1
+  weight_decay: 1.0e-4
+  warmup_iters: 500
+  grad_clip: 0.1
+  amp: true
+  log_every: 50
+  eval_every: 1000
+  seed: 0
+  ema_decay: 0.999
+  max_gpu_mem_gb: 16    # shared GPU: fail our job rather than squeeze others
+eval:
+  iou_thrs: [0.1, 0.3]
+  select_metric: tdsc_froc   # official TDSC-ABUS detection score (see evaluation/tdsc_official.py)
