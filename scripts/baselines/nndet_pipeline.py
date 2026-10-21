@@ -1,7 +1,9 @@
 """nnDetection (Retina U-Net, default RetinaUNetV001 / D3V001 plan) baseline on the same working-space volumes.
 
 Steps (each skipped when its output exists, so a rerun or a follow-up job resumes):
-  1. setup    clone nnDetection at NNDET_COMMIT (run through nndet_launch.py, which holds the torch 2 shims).
+  1. setup    clone nnDetection at NNDET_COMMIT (run through nndet_launch.py, which holds the torch 2 shims), or,
+              with --docker IMAGE, run every nnDetection command unmodified in the official image (Dockerfile of
+              the same commit: torch 1.x, compiled CUDA NMS, MLflow); this script then only exports / converts.
   2. export   working-space volumes and lesion masks as NIfTI (det_data/Task101_TDSC/raw_splitted) with the
               real per-case voxel spacing; each mask is one instance of class 0. Train + Validation are
               training cases; Validation + Test go to imagesTs for prediction.
@@ -21,10 +23,6 @@ import subprocess
 import sys
 
 import numpy as np
-import torch
-
-from medical_one.data.tdsc import load_meta
-from medical_one.evaluation.preds import save_predictions
 
 NNDET_REPO = "https://github.com/MIC-DKFZ/nnDetection.git"
 NNDET_COMMIT = "97a58f3110b71caf1b4bcc1851e67cf11e987fc5"
@@ -84,19 +82,21 @@ def export(task_dir, prep_dir, masks_dir, splits):
                    "labels": {"0": "lesion"}, "modalities": {"0": "US"}, "dim": 3}, f, indent=1)
 
 
-def check_box_convention(task_dir, metas):
-    """nnDetection's own ground-truth boxes of the exported labels must map back onto the mask extents."""
+def check_box_convention(task_dir, ids):
+    """nnDetection's own ground-truth boxes of the exported labels must map back onto the mask extents.
+    Needs nnDetection importable (inside the container in --docker mode); ``ids`` are case ids."""
     import SimpleITK as sitk
 
     from nndet.io.transforms.instances import instances_to_boxes_np
 
-    for m in metas:
+    for cid in ids:
         seg = sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(task_dir, "raw_splitted", "labelsTr",
-                                                                  f"{case_id(m)}.nii.gz")))
+                                                                  f"{cid}.nii.gz")))
         nz = np.nonzero(seg)
         ref = [a.min() for a in nz] + [a.max() + 1 for a in nz]
         got = from_nndet_boxes(instances_to_boxes_np(seg, dim=3)[0])[0]
-        assert np.allclose(got, ref), (m["case"], got, ref)
+        assert np.allclose(got, ref), (cid, got, ref)
+    print(f"box convention ok on {len(ids)} cases", flush=True)
 
 
 def run(cmd, env):
@@ -117,25 +117,46 @@ def main() -> None:
     ap.add_argument("--processes", type=int, default=8)
     ap.add_argument("--threads", type=int, default=12, help="det_num_threads (augmentation workers)")
     ap.add_argument("--train-overrides", nargs="*", default=[], help="extra nnDetection config overrides")
+    ap.add_argument("--docker", default="", help="official nnDetection image to run the nnDetection steps in")
+    ap.add_argument("--gpu", default="0", help="--docker: GPU index passed to the container")
+    ap.add_argument("--shm", default="16g", help="--docker: shared memory for the augmentation workers")
     args = ap.parse_args()
+    import torch
+
+    from medical_one.data.tdsc import load_meta
+    from medical_one.evaluation.preds import save_predictions
+
     run_dir = os.path.abspath(os.path.join(args.runs_dir, args.name))
     os.makedirs(run_dir, exist_ok=True)
     splits = load_meta(args.prep_dir)
-    root = args.nndet_dir or os.path.join(args.local_dir, "nnDetection")
-    if not os.path.isdir(root):
-        subprocess.run(["git", "clone", "-q", NNDET_REPO, root], check=True)
-        subprocess.run(["git", "-C", root, "checkout", "-q", NNDET_COMMIT], check=True)
-    sys.path.insert(0, os.path.dirname(LAUNCH))
-    from nndet_launch import patch_repo
-
-    patch_repo(root)
-    sys.path.insert(0, root)
-    data = os.path.join(args.local_dir, "nndet_data")
+    data = os.path.abspath(os.path.join(args.local_dir, "nndet_data"))
     models = os.path.join(run_dir, "nndet_models")
+    os.makedirs(data, exist_ok=True)
+    os.makedirs(models, exist_ok=True)
     env = dict(os.environ, det_data=data, det_models=models, OMP_NUM_THREADS="1",
                det_num_threads=str(args.threads), det_verbose="0")
-    os.environ.update(env)
-    launch = [sys.executable, LAUNCH, root]
+    if args.docker:  # container paths: data -> /opt/data, models -> /opt/models, this script's dir -> /opt/mo
+        docker = ["docker", "run", "--rm", "--gpus", f"device={args.gpu}", f"--shm-size={args.shm}",
+                  f"--cpus={args.threads + 1}", "-u", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp",
+                  "-e", "det_data=/opt/data", "-e", "det_models=/opt/models", "-e", "OMP_NUM_THREADS=1",
+                  "-e", f"det_num_threads={args.threads}", "-e", "det_verbose=0",
+                  "-v", f"{data}:/opt/data", "-v", f"{models}:/opt/models", "-v", f"{run_dir}:/opt/work",
+                  "-v", f"{os.path.dirname(os.path.abspath(__file__))}:/opt/mo", "-w", "/opt/work", args.docker]
+        launch_cmd = lambda cmd: docker + [f"nndet_{cmd}"]
+        cpath = lambda p: p.replace(data, "/opt/data")
+    else:
+        root = args.nndet_dir or os.path.join(args.local_dir, "nnDetection")
+        if not os.path.isdir(root):
+            subprocess.run(["git", "clone", "-q", NNDET_REPO, root], check=True)
+            subprocess.run(["git", "-C", root, "checkout", "-q", NNDET_COMMIT], check=True)
+        sys.path.insert(0, os.path.dirname(LAUNCH))
+        from nndet_launch import patch_repo
+
+        patch_repo(root)
+        sys.path.insert(0, root)
+        os.environ.update(env)
+        launch_cmd = lambda cmd: [sys.executable, LAUNCH, root, cmd]
+        cpath = lambda p: p
     task_dir = os.path.join(data, TASK)
     fold_dir = os.path.join(models, TASK, MODEL, "fold0")
     pred_dir = os.path.join(fold_dir, "test_predictions")
@@ -144,19 +165,25 @@ def main() -> None:
 
     if not done():
         export(task_dir, args.prep_dir, args.masks_dir, splits)
-        check_box_convention(task_dir, splits["Train"] + splits["Validation"])
-        run(launch + ["prep", TASK_ID, "-np", str(args.processes), "-npp", str(args.processes)], env)
+        ids = [case_id(m) for m in splits["Train"] + splits["Validation"]]
+        if args.docker:
+            run(docker + ["python", "-c", "import sys; sys.path.insert(0, '/opt/mo'); import nndet_pipeline as P; "
+                          f"P.check_box_convention('{cpath(task_dir)}', {ids!r})"], env)
+        else:
+            check_box_convention(task_dir, ids)
+        if not os.path.exists(os.path.join(task_dir, "preprocessed", "D3V001_3d")):
+            run(launch_cmd("prep") + [TASK_ID, "-np", str(args.processes), "-npp", str(args.processes)], env)
         prep_out = os.path.join(task_dir, "preprocessed")
         with open(os.path.join(prep_out, "splits_final.pkl"), "wb") as f:
             pickle.dump([{"train": [case_id(m) for m in splits["Train"]],
                           "val": [case_id(m) for m in splits["Validation"]]}], f)
-        run(launch + ["unpack", os.path.join(prep_out, "D3V001_3d", "imagesTr"), str(args.processes)], env)
+        run(launch_cmd("unpack") + [cpath(os.path.join(prep_out, "D3V001_3d", "imagesTr")), str(args.processes)], env)
         if not os.path.exists(os.path.join(fold_dir, "plan_inference.pkl")):
             mode = "resume" if os.path.exists(os.path.join(fold_dir, "model_last.ckpt")) else "overwrite"
-            run(launch + ["train", TASK_ID, "--sweep", "-o", "exp.fold=0", f"train.mode={mode}",
+            run(launch_cmd("train") + [TASK_ID, "--sweep", "-o", "exp.fold=0", f"train.mode={mode}",
                           f"trainer_cfg.max_num_epochs={args.epochs}",
                           f"trainer_cfg.num_train_batches_per_epoch={args.batches}"] + args.train_overrides, env)
-        run(launch + ["predict", TASK_ID, MODEL, "--fold", "0", "-npp", str(args.processes)], env)
+        run(launch_cmd("predict") + [TASK_ID, MODEL, "--fold", "0", "-npp", str(args.processes)], env)
 
     for split in ("Validation", "Test"):
         preds = []
