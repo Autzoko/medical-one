@@ -27,7 +27,9 @@ def build_model(cfg: Config) -> Union[ABUSDet3D, CenterDETR3D]:
     m = cfg.model
     if m.arch == "center_detr":
         return CenterDETR3D(norm=m.norm, dim=m.dim, num_queries=m.num_queries, drop=m.dropout,
-                            center_hidden=m.center_hidden)
+                            center_hidden=m.center_hidden, num_o2m=m.num_o2m, dn_number=m.dn_number,
+                            dn_noise=m.dn_noise, num_neg_queries=m.num_neg_queries,
+                            look_forward_twice=m.look_forward_twice)
     assert m.arch == "detr", m.arch
     return ABUSDet3D(norm=m.norm, dim=m.dim, num_queries=m.num_queries, drop=m.dropout)
 
@@ -90,7 +92,8 @@ class Trainer:
         self.model = build_model(cfg).to(device)
         self.ema = copy.deepcopy(self.model).eval().requires_grad_(False) if cfg.train.ema_decay > 0 else None
         self.criterion = SetCriterion(cfg.loss.w_cls, cfg.loss.w_l1, cfg.loss.w_giou,
-                                      w_neg=cfg.loss.w_neg, neg_iou=cfg.loss.neg_iou)
+                                      w_neg=cfg.loss.w_neg, neg_iou=cfg.loss.neg_iou,
+                                      iou_aware=cfg.loss.iou_aware_cls, high_order_alpha=cfg.loss.high_order_alpha)
         lc = cfg.loss
         self.center_loss = None
         if cfg.model.arch == "center_detr":
@@ -107,6 +110,7 @@ class Trainer:
         with open(os.path.join(cfg.run_dir, "config.json"), "w") as f:
             json.dump(cfg.to_dict(), f, indent=1)
         self.log_file = open(os.path.join(cfg.run_dir, "log.jsonl"), "a")
+        self.swa_sum, self.swa_n = None, 0
 
     def _log(self, record: Dict[str, object], prefix: str = "") -> None:
         print(prefix + json.dumps(record), flush=True)
@@ -147,7 +151,10 @@ class Trainer:
             negatives = {}
         dataset = PatchDataset(cfg.paths.prep_dir, train_metas, stop * t.batch_size,
                                cfg.data.pos_prob, cfg.data.margin, scale_range=cfg.data.scale_range,
-                               noise_std=cfg.data.noise_std, negatives=negatives, neg_prob=cfg.data.neg_prob)
+                               noise_std=cfg.data.noise_std, negatives=negatives, neg_prob=cfg.data.neg_prob,
+                               extra_aug={"rot90": cfg.data.rot90_prob, "blur": cfg.data.blur_prob,
+                                          "speckle": cfg.data.speckle_prob, "lowres": cfg.data.lowres_prob,
+                                          "inv_gamma": cfg.data.inv_gamma_prob})
         # Online bootstrapping: the run is cut into segments; after each, the current model re-mines its own
         # false positives on the training cases and the next segment's loader (fresh workers) samples them.
         bounds = [b for b in range(every, stop, every)] + [stop] if every > 0 else [stop]
@@ -163,8 +170,38 @@ class Trainer:
             if seg_end < stop:
                 negatives = self._refresh_negatives(it, train_metas, negatives)
                 dataset.set_negatives(negatives)
+        if self.swa_n:
+            self._finish_swa(stop, val_metas)
         if cfg.train.predict_test:
             self._predict_test()
+
+    def _accumulate_swa(self) -> None:
+        """Running sum of the evaluated weights (EMA if enabled) over the last ``swa_last`` evaluations."""
+        state = (self.ema if self.ema is not None else self.model).state_dict()
+        if self.swa_sum is None:
+            self.swa_sum = {k: v.detach().float().clone() if v.dtype.is_floating_point else v.clone()
+                            for k, v in state.items()}
+        else:
+            for k, v in state.items():
+                if v.dtype.is_floating_point:
+                    self.swa_sum[k] += v.detach().float()
+                else:
+                    self.swa_sum[k] = v.clone()
+        self.swa_n += 1
+
+    def _finish_swa(self, it: int, val_metas: List[dict]) -> None:
+        cfg = self.cfg
+        avg = {k: (v / self.swa_n).to(self.model.state_dict()[k].dtype) if v.dtype.is_floating_point else v
+               for k, v in self.swa_sum.items()}
+        model = build_model(cfg).to(self.device)
+        model.load_state_dict(avg)
+        preds = {h: predict_split(model, cfg, val_metas, self.device, head=h) for h in heads(cfg)}
+        res = compute_metrics(preds["detr"], val_metas, cfg.eval.iou_thrs)
+        self._log({"eval_swa": res, "it": it, "n_avg": self.swa_n}, prefix="EVAL ")
+        torch.save({"model": avg, "it": it, "n_avg": self.swa_n, "val": res}, os.path.join(cfg.run_dir, "swa.pt"))
+        for h, p in preds.items():
+            save_predictions(os.path.join(cfg.run_dir, f"preds_val_swa{_suffix(h)}.json"), p, val_metas,
+                             {"checkpoint": "swa.pt", "it": it, "n_avg": self.swa_n, "head": h})
 
     def _refresh_negatives(self, it: int, train_metas: List[dict], negatives):
         """In-sample mining with the evaluation model (EMA if enabled), merged with earlier negatives."""
@@ -186,13 +223,28 @@ class Trainer:
         x = batch[0].to(self.device, non_blocking=True)
         targets = [tg.to(self.device) for tg in batch[1]]
         negs = [n.to(self.device) for n in batch[2]] if len(batch) > 2 else None
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=t.amp):
-            outputs = self.model(x)
-        loss, last = self.criterion.total(outputs[0], outputs[1], targets, negs)
-        center_parts = None
-        if self.center_loss is not None:
-            center, center_parts = self.center_loss(outputs[2], targets)
-            loss = loss + center
+        self.criterion.high_order = it > cfg.loss.high_order_start * t.iters
+        center_parts = extra_parts = None
+        if self.center_loss is None:
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=t.amp):
+                dec_outputs, enc_output = self.model(x)
+            loss, last = self.criterion.total(dec_outputs, enc_output, targets, negs)
+        else:
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=t.amp):
+                out = self.model(x, targets, negs)
+            loss, last = self.criterion.total(out["o2o"], out["enc"], targets, negs)
+            center, center_parts = self.center_loss(out["center"], targets)
+            loss, extra_parts = loss + center, {}
+            lc = cfg.loss
+            if out["o2m"] is not None:
+                extra_parts["o2m"] = sum(self.criterion(o, targets, repeat=lc.o2m_k) for o in out["o2m"])
+                loss = loss + lc.w_o2m * extra_parts["o2m"]
+            if out["dn"] is not None:
+                extra_parts["dn"] = sum(self.criterion.dn_loss(o, targets, out["dn_meta"]) for o in out["dn"])
+                loss = loss + lc.w_dn * extra_parts["dn"]
+            if out["neg"] is not None:
+                extra_parts["neg"] = sum(self.criterion.background_loss(o, targets) for o in out["neg"])
+                loss = loss + lc.w_neg_queries * extra_parts["neg"]
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), t.grad_clip)
@@ -204,6 +256,8 @@ class Trainer:
                    "sec": round(time.time() - start, 1)}
             if center_parts is not None:
                 rec["center"] = {k: round(v.item(), 4) for k, v in center_parts.items()}
+            if extra_parts:
+                rec["extra"] = {k: round(v.item(), 4) for k, v in extra_parts.items()}
             self._log(rec)
         if it % t.eval_every == 0 or it == stop:
             eval_model = self.ema if self.ema is not None else self.model
@@ -217,6 +271,8 @@ class Trainer:
                                                                           "tdsc_max_recall", "top1_hit@0.3")}},
                           prefix="EVAL ")
             self._save("last.pt", it)
+            if t.swa_last and it > stop - t.swa_last * t.eval_every:
+                self._accumulate_swa()
             if res[cfg.eval.select_metric] > best:  # selection: expert 2 on Validation only
                 best = res[cfg.eval.select_metric]
                 self._save("best.pt", it, val=res)
@@ -230,7 +286,10 @@ class Trainer:
         """Test-set predictions of best.pt and last.pt, saved for later scoring (never used for selection)."""
         model = build_model(self.cfg).to(self.device)
         metas = self.splits["Test"]
-        for ckpt, out in (("best.pt", "preds_Test"), ("last.pt", "preds_Test_last")):
+        ckpts = [("best.pt", "preds_Test"), ("last.pt", "preds_Test_last")]
+        if os.path.exists(os.path.join(self.cfg.run_dir, "swa.pt")):
+            ckpts.append(("swa.pt", "preds_Test_swa"))
+        for ckpt, out in ckpts:
             state = torch.load(os.path.join(self.cfg.run_dir, ckpt), map_location=self.device, weights_only=False)
             model.load_state_dict(state["model"])
             for h in heads(self.cfg):

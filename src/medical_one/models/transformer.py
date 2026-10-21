@@ -48,9 +48,10 @@ class SelfAttention(nn.Module):
         super().__init__()
         self.attn = nn.MultiheadAttention(dim, heads, dropout=drop, batch_first=True)
 
-    def forward(self, x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, pos: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """``attn_mask`` [Q,Q] bool, True = query (row) may not attend to key (column)."""
         q = x + pos
-        return self.attn(q, q, x, need_weights=False)[0]
+        return self.attn(q, q, x, attn_mask=attn_mask, need_weights=False)[0]
 
 
 class MLP(nn.Module):
@@ -85,17 +86,24 @@ class DecoderLayer(nn.Module):
         self.norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(3)])
         self.drop = nn.Dropout(drop)
 
-    def forward(self, q, pos, ref, memory, shapes):
-        q = self.norms[0](q + self.drop(self.attentions[0](q, pos)))
+    def forward(self, q, pos, ref, memory, shapes, attn_mask=None):
+        q = self.norms[0](q + self.drop(self.attentions[0](q, pos, attn_mask)))
         q = self.norms[1](q + self.drop(self.attentions[1](q + pos, ref, memory, shapes)))
         return self.norms[2](self.ffns[0](q))
 
 
 class Transformer3D(nn.Module):
     def __init__(self, dim: int = 192, levels: int = 3, enc_layers: int = 3, dec_layers: int = 6,
-                 num_queries: int = 900, drop: float = 0.0, prior_prob: float = 0.01):
+                 num_queries: int = 900, drop: float = 0.0, prior_prob: float = 0.01,
+                 look_forward_twice: bool = False, extra_queries: bool = False):
+        """``look_forward_twice`` (DINO): layer i's box is refined from layer i-1's box *with* gradient, only the
+        reference fed to layer i+1 is detached. ``extra_queries``: a learned content embedding for externally
+        given boxes (denoising / hard-negative queries, see ``forward``)."""
         super().__init__()
         self.dim, self.levels, self.num_queries = dim, levels, num_queries
+        self.look_forward_twice = look_forward_twice
+        if extra_queries:
+            self.extra_embed = nn.Parameter(torch.zeros(dim))
         self.encoder = nn.Module()
         self.encoder.layers = nn.ModuleList([EncoderLayer(dim, drop) for _ in range(enc_layers)])
         self.decoder = nn.Module()
@@ -133,10 +141,15 @@ class Transformer3D(nn.Module):
         return self._static_cache[key]
 
     def forward(self, feats: List[torch.Tensor], query_index: Optional[torch.Tensor] = None,
-                query_ref: Optional[torch.Tensor] = None) -> Tuple[List[Output], Output]:
+                query_ref: Optional[torch.Tensor] = None, extra_ref: Optional[torch.Tensor] = None,
+                attn_mask: Optional[torch.Tensor] = None) -> Tuple[List[Output], Output]:
         """``query_index`` [B,K] (positions in the flattened level-0 grid) and ``query_ref`` [B,K,6] (center/size
         boxes in (0,1)) replace the encoder top-K proposals as decoder queries (proposals of an external dense
-        head); both are treated as constants, like the encoder proposals."""
+        head); both are treated as constants, like the encoder proposals.
+
+        ``extra_ref`` [B,E,6] (center/size in (0,1)) appends E queries after the K proposal queries, built like
+        DINO's denoising queries: position from the box, content = the learned ``extra_embed``. ``attn_mask``
+        [K+E, K+E] (True = blocked) is applied in every decoder self-attention. Outputs cover all K+E queries."""
         shapes = [tuple(f.shape[2:]) for f in feats]
         B = feats[0].shape[0]
         pos_levels, ref, props_unact, valid = self._static(shapes, feats[0].device)
@@ -161,12 +174,22 @@ class Transformer3D(nn.Module):
             self.pos_trans(sine_embed(ref_q, 2 * self.dim // 6).to(src.dtype))).split(self.dim, -1)
         topk_mem = torch.gather(out_mem, 1, topk[..., None].expand(-1, -1, self.dim)).detach()
         query = query + self.pix_trans_norm(self.pix_trans(topk_mem))
+        if extra_ref is not None and extra_ref.shape[1]:
+            extra_ref = extra_ref.detach().float()
+            e_pos, e_query = self.pos_trans_norm(
+                self.pos_trans(sine_embed(extra_ref, 2 * self.dim // 6).to(src.dtype))).split(self.dim, -1)
+            query = torch.cat([query, e_query + self.extra_embed.to(e_query.dtype)], 1)
+            query_pos = torch.cat([query_pos, e_pos], 1)
+            ref_q = torch.cat([ref_q, extra_ref], 1)
 
         outputs: List[Output] = []
+        prev = ref_q  # box the layer's offset is applied to (with gradient under look-forward-twice)
         for lid, layer in enumerate(self.decoder.layers):
-            query = layer(query, query_pos, ref_q[:, :, None].expand(-1, -1, self.levels, -1), memory, shapes)
-            boxes = (self.decoder.bbox_embed[lid](query).float() + inverse_sigmoid(ref_q)).sigmoid()
+            query = layer(query, query_pos, ref_q[:, :, None].expand(-1, -1, self.levels, -1), memory, shapes,
+                          attn_mask)
+            boxes = (self.decoder.bbox_embed[lid](query).float() + inverse_sigmoid(prev)).sigmoid()
             outputs.append({"logits": self.decoder.class_embed[lid](query).float(), "boxes": boxes})
+            prev = boxes if self.look_forward_twice else boxes.detach()
             ref_q = boxes.detach()
 
         enc_out = {"logits": enc_logits.float().masked_fill(~valid[None, :, None], -1e4),

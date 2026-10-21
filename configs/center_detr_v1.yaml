@@ -1,0 +1,71 @@
+# v1 = configs/center_detr.yaml + model / training tricks (docs/prereg/center_detr_v1.md):
+#   expert 2: Rank-DETR GIoU-aware classification + high-order matching (last 25%), H-DETR one-to-many queries,
+#   DINO contrastive denoising + look-forward-twice, mined hard negatives as background queries;
+#   data: box-exact lateral rot90, blur / speckle / low-res / inverted gamma, online hard-negative mining;
+#   expert 1 loss weight x2; SWA of the last 5 evaluated EMA models; post-processing grid on Validation.
+name: center_detr_v1
+paths:
+  tdsc_root: ~/data-001/langtian/data/medical-image/ABUS_TDSC
+  extracted_train: ~/langtian/abus3d_repro/data/raw   # parent of the unzipped Train/ (the release zips it)
+  prep_dir: ~/langtian/abus3d_repro/data/prep
+  runs_dir: ~/langtian/abus3d_repro/runs
+model:
+  arch: center_detr
+  norm: gn          # BN was folded at export; GN is safer at batch size 2
+  dim: 192
+  num_queries: 300   # expert-1 peaks seed the decoder (one-to-one, the only queries at inference)
+  dropout: 0.0
+  num_o2m: 600       # H-DETR: next 600 expert-1 peaks, targets repeated o2m_k times
+  dn_number: 100     # DINO CDN (groups = 100 // (2 * max GT per patch))
+  dn_noise: 1.0
+  num_neg_queries: 10
+  look_forward_twice: true
+data:
+  pos_prob: 0.7
+  margin: 24
+  num_workers: 8
+  scale_range: 0.2
+  noise_std: 8.0
+  train_splits: [Train]
+  rot90_prob: 0.5
+  blur_prob: 0.2
+  speckle_prob: 0.2
+  lowres_prob: 0.25
+  inv_gamma_prob: 0.1
+  neg_refresh_every: 2000   # online mining with the EMA model on the training cases
+  neg_prob: 0.2
+  neg_min_score: 0.3
+  neg_top: 5
+loss:
+  w_cls: 2.0
+  w_l1: 5.0
+  w_giou: 2.0
+  w_center_heat: 2.0
+  w_center_size: 2.0
+  w_center_offset: 2.0
+  w_center_giou: 2.0
+  iou_aware_cls: true
+  high_order_alpha: 4.0
+  high_order_start: 0.75
+  o2m_k: 6
+  w_o2m: 1.0
+  w_dn: 1.0
+  w_neg_queries: 1.0
+train:
+  iters: 20000
+  batch_size: 2
+  lr: 2.0e-4
+  offset_lr_mult: 0.1
+  weight_decay: 1.0e-4
+  warmup_iters: 500
+  grad_clip: 0.1
+  amp: true
+  log_every: 50
+  eval_every: 1000
+  seed: 0
+  ema_decay: 0.999
+  swa_last: 5        # average the EMA weights of the last 5 evaluations (16k..20k) -> swa.pt
+  max_gpu_mem_gb: 16    # shared GPU: fail our job rather than squeeze others
+eval:
+  iou_thrs: [0.1, 0.3]
+  select_metric: tdsc_froc   # official TDSC-ABUS detection score (see evaluation/tdsc_official.py)

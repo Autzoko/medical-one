@@ -25,6 +25,10 @@ class PatchDataset(torch.utils.data.Dataset):
     ``scale_range`` > 0 crops a lateral (d, w) window of size PATCH * U(1-r, 1+r) per axis and resizes it
     to PATCH; ``noise_std`` adds Gaussian noise in uint8 units. Both are off by default.
 
+    ``extra_aug`` (probabilities, all 0 by default; see ``DataConfig``): ``rot90`` swaps the lateral axes d and w
+    (box-exact; the patch is square in d/w), ``blur`` / ``speckle`` / ``lowres`` / ``inv_gamma`` are intensity
+    transforms after nnDetection's ``base_more`` and nnU-Net's low-resolution simulation.
+
     ``negatives`` maps (split, case) to hard-negative boxes (``hardneg``); then an item also returns the
     negatives whose center lies inside the patch (same transform as the target), and with ``neg_prob`` a
     patch is centred on one of the case's negatives instead of being random (``neg_prob`` <= 1 - ``pos_prob``).
@@ -33,7 +37,7 @@ class PatchDataset(torch.utils.data.Dataset):
     def __init__(self, prep_dir: str, metas: Sequence[dict], length: int, pos_prob: float = 0.7,
                  margin: int = 24, augment: bool = True, scale_range: float = 0.0, noise_std: float = 0.0,
                  negatives: Optional[Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray]]] = None,
-                 neg_prob: float = 0.0):
+                 neg_prob: float = 0.0, extra_aug: Optional[Dict[str, float]] = None):
         self.cases = [(load_volume(prep_dir, m), np.asarray(m["box"], np.float32)) for m in metas]
         self.keys = [(m["split"], m["case"]) for m in metas]
         self.length, self.pos_prob, self.margin, self.augment = length, pos_prob, margin, augment
@@ -41,6 +45,9 @@ class PatchDataset(torch.utils.data.Dataset):
         assert neg_prob <= 1 - pos_prob + 1e-9, "negative patches are taken from the random share"
         self.set_negatives(negatives)
         self.neg_prob = neg_prob
+        self.extra_aug = {k: 0.0 for k in ("rot90", "blur", "speckle", "lowres", "inv_gamma")}
+        self.extra_aug.update(extra_aug or {})
+        assert PATCH[0] == PATCH[2] or not self.extra_aug["rot90"], "rot90 needs a square lateral patch"
 
     def set_negatives(self, negatives) -> None:
         """Replace the hard negatives (workers forked afterwards see the new list)."""
@@ -86,6 +93,7 @@ class PatchDataset(torch.utils.data.Dataset):
         b = np.clip(b, 0, self.scale)
         if self.augment:
             x, b = self._augment(x, b)
+            x, b = self._extra(x, b)
             if self.noise_std > 0:
                 x = x + torch.randn_like(x) * self.noise_std
         b = torch.from_numpy(b / self.scale)
@@ -93,6 +101,26 @@ class PatchDataset(torch.utils.data.Dataset):
         if self.negatives is None:
             return normalize(x)[None], target
         return normalize(x)[None], target, b[1:][torch.from_numpy(inside[1:])]
+
+    def _extra(self, x: torch.Tensor, b: np.ndarray) -> Tuple[torch.Tensor, np.ndarray]:
+        """Optional box-exact spatial + intensity transforms on a uint8-range patch [D,H,W]; b: boxes [N,6]."""
+        p = self.extra_aug
+        if random.random() < p["rot90"]:  # lateral axis swap; with the two flips this spans all 8 symmetries
+            x, b = x.permute(2, 1, 0).contiguous(), b[:, [2, 1, 0, 5, 4, 3]].copy()
+        if random.random() < p["inv_gamma"]:
+            x = 255 - ((255 - x) / 255).clamp(1e-6, 1) ** math.exp(random.uniform(-0.3, 0.3)) * 255
+        if random.random() < p["blur"]:
+            from scipy.ndimage import gaussian_filter
+
+            x = torch.from_numpy(gaussian_filter(x.numpy(), [random.uniform(0.5, 1.0) for _ in range(3)]))
+        if random.random() < p["speckle"]:
+            x = x * (1 + torch.randn_like(x) * random.uniform(0.0, 0.1))
+        if random.random() < p["lowres"]:
+            z = random.uniform(0.5, 1.0)
+            small = [max(1, int(round(n * z))) for n in x.shape]
+            x = F.interpolate(F.interpolate(x[None, None], size=small, mode="nearest"), size=tuple(x.shape),
+                              mode="trilinear", align_corners=False)[0, 0]
+        return x, b
 
     @staticmethod
     def _augment(x: torch.Tensor, b: np.ndarray) -> Tuple[torch.Tensor, np.ndarray]:

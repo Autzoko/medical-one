@@ -58,12 +58,14 @@ def decode_boxes(size: torch.Tensor, offset: torch.Tensor) -> torch.Tensor:
 
 
 def peaks(heat_logits: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Top-k local maxima (3x3x3) of the heat map: (flat cell indices [B,k], heat logits there [B,k])."""
+    """Top-k cells of the heat map, local maxima (3x3x3) first, each group by heat: (flat cell indices [B,k],
+    heat logits there [B,k]). A smooth trained heat map can have fewer peaks than k; the remaining slots are then
+    the best non-peak cells, so the first k' < k cells never depend on k."""
     flat = heat_logits.flatten(1)
     is_peak = (heat_logits == F.max_pool3d(heat_logits, 3, 1, 1)).flatten(1)
-    ranked = flat.masked_fill(~is_peak, float("-inf"))
+    ranked = flat - 1e4 * (~is_peak).to(flat.dtype)
     k = min(k, flat.shape[1])
-    idx = ranked.topk(k, dim=1).indices  # fewer peaks than k: non-peaks fill the tail (they score -inf -> low)
+    idx = ranked.topk(k, dim=1).indices
     return idx, torch.gather(flat, 1, idx)
 
 

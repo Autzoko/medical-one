@@ -22,6 +22,12 @@ class ModelConfig:
     num_queries: int = 900
     dropout: float = 0.0
     center_hidden: int = 96  # center_detr: channels of the center-head branches
+    # center_detr training-only query groups and decoder refinement (all off = the baseline CenterDETR3D)
+    num_o2m: int = 0  # one-to-many queries (H-DETR hybrid matching); targets repeated loss.o2m_k times
+    dn_number: int = 0  # DINO contrastive denoising: groups = dn_number // (2 * max GT per patch)
+    dn_noise: float = 1.0  # DINO box noise scale (positives move < 1 x half-size per corner, negatives 1..2 x)
+    num_neg_queries: int = 0  # mined hard negatives fed as background queries (needs data.neg_refresh_every)
+    look_forward_twice: bool = False  # DINO: box refinement keeps the gradient to the previous layer's box
 
 
 @dataclass
@@ -40,6 +46,12 @@ class DataConfig:
     neg_min_score: float = 0.3  # online mining: score threshold, boxes per case, keep earlier negatives
     neg_top: int = 5
     neg_keep_old: bool = True
+    # extra augmentation (0 = off); box-exact only, since training has boxes but no masks
+    rot90_prob: float = 0.0  # swap the two lateral axes (d <-> w); with the flips: all 8 lateral symmetries
+    blur_prob: float = 0.0  # Gaussian blur, sigma U(0.5, 1) voxels (nnDetection base_more: p 0.2)
+    speckle_prob: float = 0.0  # multiplicative noise x * (1 + N(0, s)), s ~ U(0, 0.1) (ultrasound speckle)
+    lowres_prob: float = 0.0  # simulate low resolution: zoom U(0.5, 1) nearest down, linear up (nnU-Net: p 0.25)
+    inv_gamma_prob: float = 0.0  # gamma on the inverted image (nnDetection base_more: p 0.1)
 
 
 @dataclass
@@ -56,6 +68,14 @@ class LossConfig:
     w_center_giou: float = 1.0
     center_sigma_ratio: float = 0.1667  # Gaussian sigma per axis = ratio x box size (cells), at least min_sigma
     center_min_sigma: float = 0.5
+    # center_detr expert-2 extras
+    o2m_k: int = 6  # H-DETR: each target repeated k times for the one-to-many queries
+    w_o2m: float = 1.0
+    w_dn: float = 1.0
+    w_neg_queries: float = 1.0
+    iou_aware_cls: bool = False  # Rank-DETR GIoU-aware classification loss
+    high_order_alpha: float = 4.0  # Rank-DETR high-order matching cost -p * IoU^alpha ...
+    high_order_start: float = 1.0  # ... from this fraction of training on (Rank-DETR: 67500/90000 = 0.75; 1 = never)
 
 
 @dataclass
@@ -75,6 +95,7 @@ class TrainConfig:
     max_gpu_mem_gb: float = 0.0  # 0 = no cap; otherwise cap this process to protect shared GPUs
     predict_test: bool = True  # after training, save Test predictions of best.pt (scored only at the end)
     stop_iter: int = 0  # stop early (and save) at this iteration while keeping the ``iters`` LR schedule; 0 = iters
+    swa_last: int = 0  # > 0: average the evaluated (EMA) weights of the last N evaluations -> swa.pt
 
 
 @dataclass
