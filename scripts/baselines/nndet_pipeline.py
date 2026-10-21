@@ -140,6 +140,8 @@ def main() -> None:
                   f"--cpus={args.threads + 1}", "-u", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp",
                   "-e", "det_data=/opt/data", "-e", "det_models=/opt/models", "-e", "OMP_NUM_THREADS=1",
                   "-e", f"det_num_threads={args.threads}", "-e", "det_verbose=0",
+                  # the image's protobuf is newer than its 2021 mlflow / tensorboard protos (protobuf's own fix)
+                  "-e", "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python",
                   "-v", f"{data}:/opt/data", "-v", f"{models}:/opt/models", "-v", f"{run_dir}:/opt/work",
                   "-v", f"{os.path.dirname(os.path.abspath(__file__))}:/opt/mo", "-w", "/opt/work", args.docker]
         launch_cmd = lambda cmd: docker + [f"nndet_{cmd}"]
