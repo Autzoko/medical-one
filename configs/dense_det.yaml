@@ -1,0 +1,60 @@
+# DenseDet3D (docs/prereg/dense_codetr.md): CNN backbone + neck, center heat-map head + dense anchor-based box head
+# (nnDetection's Retina U-Net recipe re-implemented without segmentation: ATSS, batched hard-negative sampling,
+# BCE + GIoU; anchor shapes by k-means on the training boxes). Official TDSC split: train = Train, checkpoint
+# selection on Validation (official FROC of the "dense" output). Lessons of E14: no rot90 (it breaks the d/w
+# shape prior), shorter run with best.pt selection, no score threshold (up to 50 boxes per volume).
+name: dense_det
+paths:
+  tdsc_root: ~/data-001/langtian/data/medical-image/ABUS_TDSC
+  extracted_train: ~/langtian/abus3d_repro/data/raw
+  prep_dir: ~/langtian/abus3d_repro/data/prep
+  runs_dir: ~/langtian/abus3d_repro/runs
+model:
+  arch: dense
+  norm: gn
+  dim: 192
+  center_hidden: 96
+  dense_hidden: 128        # nnDetection head_channels
+  dense_convs: 1           # nnDetection num_convs
+  anchors_per_level: 3
+data:
+  pos_prob: 0.7
+  margin: 24
+  num_workers: 8
+  scale_range: 0.2
+  noise_std: 8.0
+  train_splits: [Train]
+  rot90_prob: 0.0
+  blur_prob: 0.2
+  speckle_prob: 0.2
+  lowres_prob: 0.25
+  inv_gamma_prob: 0.1
+loss:
+  w_center_heat: 1.0
+  w_center_size: 1.0
+  w_center_offset: 1.0
+  w_center_giou: 1.0
+  w_dense: 1.0
+  dense_candidates: 4      # nnDetection ATSS num_candidates
+  dense_batch_per_image: 32
+  dense_pos_fraction: 0.33
+  dense_pool: 20.0
+train:
+  iters: 12000
+  batch_size: 2
+  lr: 2.0e-4
+  offset_lr_mult: 0.1
+  weight_decay: 1.0e-4
+  warmup_iters: 500
+  grad_clip: 0.1
+  amp: true
+  log_every: 50
+  eval_every: 1000
+  seed: 0
+  ema_decay: 0.999
+  max_gpu_mem_gb: 16
+eval:
+  iou_thrs: [0.1, 0.3]
+  select_metric: tdsc_froc
+  head: dense
+  score_thr: 0.0           # keep up to max_dets boxes per volume (E14: the 0.01 cut capped recall)

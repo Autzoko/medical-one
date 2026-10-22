@@ -16,7 +16,8 @@ class PathsConfig:
 
 @dataclass
 class ModelConfig:
-    arch: str = "detr"  # "detr": ABUSDet3D; "center_detr": expert 1 (center heat map) + expert 2 (DETR), CenterDETR3D
+    arch: str = "detr"  # "detr": ABUSDet3D; "center_detr": expert 1 (center heat map) + expert 2 (DETR), CenterDETR3D;
+    # "dense": DenseDet3D (heat map + dense anchor boxes); "co_detr": CoDETR3D (DETR + dense aux heads, Co-DETR)
     norm: str = "gn"
     dim: int = 192
     num_queries: int = 900
@@ -28,6 +29,11 @@ class ModelConfig:
     dn_noise: float = 1.0  # DINO box noise scale (positives move < 1 x half-size per corner, negatives 1..2 x)
     num_neg_queries: int = 0  # mined hard negatives fed as background queries (needs data.neg_refresh_every)
     look_forward_twice: bool = False  # DINO: box refinement keeps the gradient to the previous layer's box
+    # dense / co_detr: anchor-based dense box head (nnDetection Retina U-Net recipe, see models/dense_head.py)
+    dense_hidden: int = 128  # tower channels (nnDetection head_channels)
+    dense_convs: int = 1  # conv blocks per tower (nnDetection num_convs)
+    anchors_per_level: int = 3  # anchor shapes per level, k-means on the training box sizes
+    max_pos_queries: int = 300  # co_detr: customised positive queries per image (Co-DETR max_pos_coords)
 
 
 @dataclass
@@ -76,6 +82,13 @@ class LossConfig:
     iou_aware_cls: bool = False  # Rank-DETR GIoU-aware classification loss
     high_order_alpha: float = 4.0  # Rank-DETR high-order matching cost -p * IoU^alpha ...
     high_order_start: float = 1.0  # ... from this fraction of training on (Rank-DETR: 67500/90000 = 0.75; 1 = never)
+    # dense / co_detr: dense box head (ATSS + batched hard-negative sampling; nnDetection v001 values)
+    w_dense: float = 1.0  # weight of the dense box-head loss (co_detr: Co-DETR lambda_2 x decoder layers = 12)
+    dense_candidates: int = 4  # ATSS candidates per level and anchor shape
+    dense_batch_per_image: int = 32
+    dense_pos_fraction: float = 0.33
+    dense_pool: float = 20.0
+    w_pos_queries: float = 1.0  # co_detr: customised positive queries (Co-DETR lambda_1)
 
 
 @dataclass

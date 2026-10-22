@@ -1,0 +1,68 @@
+# CoDETR3D (docs/prereg/dense_codetr.md): two-stage deformable DETR (300 queries, Rank-DETR losses) + the dense box
+# head and the heat-map head of DenseDet3D as Co-DETR auxiliary one-to-many heads on the encoder memory; the dense
+# head's ATSS positives are fed as customised positive queries (second decoder pass, fixed targets). Inference
+# uses the one-to-one decoder ("detr"). Same data / training / selection settings as configs/dense_det.yaml.
+name: co_detr
+paths:
+  tdsc_root: ~/data-001/langtian/data/medical-image/ABUS_TDSC
+  extracted_train: ~/langtian/abus3d_repro/data/raw
+  prep_dir: ~/langtian/abus3d_repro/data/prep
+  runs_dir: ~/langtian/abus3d_repro/runs
+model:
+  arch: co_detr
+  norm: gn
+  dim: 192
+  center_hidden: 96
+  dense_hidden: 128        # nnDetection head_channels
+  dense_convs: 1           # nnDetection num_convs
+  anchors_per_level: 3
+  num_queries: 300
+  max_pos_queries: 300     # Co-DETR max_pos_coords
+data:
+  pos_prob: 0.7
+  margin: 24
+  num_workers: 8
+  scale_range: 0.2
+  noise_std: 8.0
+  train_splits: [Train]
+  rot90_prob: 0.0
+  blur_prob: 0.2
+  speckle_prob: 0.2
+  lowres_prob: 0.25
+  inv_gamma_prob: 0.1
+loss:
+  w_center_heat: 1.0
+  w_center_size: 1.0
+  w_center_offset: 1.0
+  w_center_giou: 1.0
+  w_dense: 12.0           # Co-DETR: aux head weight lambda_2 (2) x decoder layers (6)
+  w_pos_queries: 1.0      # Co-DETR lambda_1: customised positive queries
+  w_cls: 2.0
+  w_l1: 5.0
+  w_giou: 2.0
+  iou_aware_cls: true     # Rank-DETR GIoU-aware classification
+  high_order_alpha: 4.0   # Rank-DETR high-order matching -p * IoU^4 ...
+  high_order_start: 0.75  # ... over the last 25% of training
+  dense_candidates: 4      # nnDetection ATSS num_candidates
+  dense_batch_per_image: 32
+  dense_pos_fraction: 0.33
+  dense_pool: 20.0
+train:
+  iters: 12000
+  batch_size: 2
+  lr: 2.0e-4
+  offset_lr_mult: 0.1
+  weight_decay: 1.0e-4
+  warmup_iters: 500
+  grad_clip: 0.1
+  amp: true
+  log_every: 50
+  eval_every: 1000
+  seed: 0
+  ema_decay: 0.999
+  max_gpu_mem_gb: 16
+eval:
+  iou_thrs: [0.1, 0.3]
+  select_metric: tdsc_froc
+  head: detr
+  score_thr: 0.0           # keep up to max_dets boxes per volume (E14: the 0.01 cut capped recall)

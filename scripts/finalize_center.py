@@ -1,9 +1,14 @@
-"""After training a CenterDETR3D run: the pre-registered post-processing grid on Validation, plus Test predictions
-for every grid cell (saved, NOT scored here; Test is scored once, for the cell chosen on Validation).
+"""After training a CenterDETR3D / DenseDet3D / CoDETR3D run: the pre-registered post-processing grid on Validation,
+plus Test predictions for every grid cell (saved, NOT scored here; Test is scored once, for the cell chosen on
+Validation).
 
-Grid (docs/prereg/center_detr_v1.md): checkpoint swa.pt (fallback best.pt) x output {E2 = expert 2,
-E1 = expert 1, E1+E2 = WBF IoU 0.5 with equal weights, fused score = mean so it stays in [0, 1]}
-x per-window NMS IoU {0.05, 0.1, 0.2}. Writes <run>/final/val_grid.json and <run>/final/<cell>_{Validation,Test}.json.
+Grids:
+  center_detr (docs/prereg/center_detr_v1.md): checkpoint swa.pt (fallback best.pt) x output {E2 = expert 2,
+    E1 = expert 1, E1+E2 = WBF IoU 0.5 with equal weights, fused score = mean so it stays in [0, 1]}
+    x per-window NMS IoU {0.05, 0.1, 0.2};
+  dense / co_detr (docs/prereg/dense_codetr.md): checkpoint best.pt x output {dense, dense_heat} / {detr, dense_heat}
+    x per-window NMS IoU {0.1, 0.2}.
+Writes <run>/final/val_grid.json and <run>/final/<cell>_{Validation,Test}.json.
 
   python scripts/finalize_center.py RUN_DIR --set paths.prep_dir=... [--device cuda]
 """
@@ -19,8 +24,18 @@ from medical_one.engine import build_model, predict_split
 from medical_one.evaluation import compute_metrics
 from medical_one.evaluation.preds import fuse_predictions, save_predictions
 
-NMS = (0.05, 0.1, 0.2)
-OUTPUTS = ("E2", "E1", "E1+E2")
+GRIDS = {"center_detr": (("E2", "E1", "E1+E2"), (0.05, 0.1, 0.2), ("swa.pt", "best.pt")),
+         "dense": (("dense", "dense_heat"), (0.1, 0.2), ("best.pt",)),
+         "co_detr": (("detr", "dense_heat"), (0.1, 0.2), ("best.pt",))}
+
+
+def _outputs(model, cfg, metas, device, arch, names):
+    if arch == "center_detr":
+        out = {"E2": predict_split(model, cfg, metas, device, head="detr"),
+               "E1": predict_split(model, cfg, metas, device, head="center")}
+        out["E1+E2"] = fuse_predictions([out["E2"], out["E1"]], 0.5, cfg.eval.max_dets)
+        return out
+    return {n: predict_split(model, cfg, metas, device, head=n) for n in names}
 
 
 def main() -> None:
@@ -44,7 +59,9 @@ def main() -> None:
         cur[key.split(".")[-1]] = raw
         _update(cfg, node)
     cfg.expand_paths()
-    ckpt = "swa.pt" if os.path.exists(os.path.join(args.run_dir, "swa.pt")) else "best.pt"
+    arch = cfg.model.arch
+    outputs, nms_grid, ckpts = GRIDS[arch]
+    ckpt = next(c for c in ckpts if os.path.exists(os.path.join(args.run_dir, c)))
     model = build_model(cfg).to(args.device)
     state = torch.load(os.path.join(args.run_dir, ckpt), map_location=args.device, weights_only=False)
     model.load_state_dict(state["model"])
@@ -52,14 +69,12 @@ def main() -> None:
     out_dir = os.path.join(args.run_dir, "final")
     os.makedirs(out_dir, exist_ok=True)
     grid = {"checkpoint": ckpt, "it": state["it"], "cells": {}}
-    for nms in NMS:
+    for nms in nms_grid:
         cfg.eval.window_nms = nms
         for split in args.splits:
             metas = splits[split]
-            heads = {"E2": predict_split(model, cfg, metas, args.device, head="detr"),
-                     "E1": predict_split(model, cfg, metas, args.device, head="center")}
-            heads["E1+E2"] = fuse_predictions([heads["E2"], heads["E1"]], 0.5, cfg.eval.max_dets)
-            for name in OUTPUTS:
+            heads = _outputs(model, cfg, metas, args.device, arch, outputs)
+            for name in outputs:
                 cell = f"{name}_nms{nms}"
                 save_predictions(os.path.join(out_dir, f"{cell}_{split}.json"), heads[name], metas,
                                  {"checkpoint": ckpt, "it": state["it"], "output": name, "window_nms": nms})

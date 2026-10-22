@@ -132,6 +132,14 @@ class SetCriterion(nn.Module):
         pos, soft, l1, giou = self._positives(logits, boxes, pairs, targets)
         return (self.w_cls * self._cls(logits, pos, soft) + self.w_l1 * l1 + self.w_giou * giou) / num
 
+    def assigned_loss(self, output: dict, targets: Sequence[torch.Tensor], pairs) -> torch.Tensor:
+        """Fixed assignment, no matching (Co-DETR customised positive queries): ``pairs`` per sample
+        (query idx, target idx); every other query is background."""
+        logits, boxes = output["logits"], output["boxes"]
+        num = max(sum(len(q) for q, _ in pairs), 1)
+        pos, soft, l1, giou = self._positives(logits, boxes, pairs, targets)
+        return (self.w_cls * self._cls(logits, pos, soft) + self.w_l1 * l1 + self.w_giou * giou) / num
+
     def background_loss(self, output: dict, targets: Sequence[torch.Tensor]) -> torch.Tensor:
         """Hard-negative queries: classification towards background only."""
         logits = output["logits"]

@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from ..config import Config
-from ..data.dataset import PatchDataset, collate
+from ..data.dataset import PATCH, PatchDataset, collate
 from ..data.tdsc import load_meta, load_volume, train_val_metas
 from ..evaluation.metrics import compute_metrics
 from ..evaluation.preds import save_predictions
@@ -19,12 +19,22 @@ from ..hardneg import load_negatives, mine, save_negatives, union
 from ..losses.set_criterion import SetCriterion
 from ..models.center_detr import CenterDETR3D
 from ..models.center_head import CenterLoss
+from ..models.dense_det import CoDETR3D, DenseDet3D, positive_queries
+from ..models.dense_head import DenseLoss, plan_anchors
 from ..models.detector import ABUSDet3D
 from .inference import predict_volume, predict_volume_fused
 
 
-def build_model(cfg: Config) -> Union[ABUSDet3D, CenterDETR3D]:
+def build_model(cfg: Config) -> Union[ABUSDet3D, CenterDETR3D, DenseDet3D, CoDETR3D]:
+    """Anchor shapes of the dense models are a buffer: set by the trainer (``plan_anchors``) or a checkpoint."""
     m = cfg.model
+    if m.arch == "dense":
+        return DenseDet3D(norm=m.norm, dim=m.dim, center_hidden=m.center_hidden, dense_hidden=m.dense_hidden,
+                          dense_convs=m.dense_convs, anchors_per_level=m.anchors_per_level)
+    if m.arch == "co_detr":
+        return CoDETR3D(norm=m.norm, dim=m.dim, num_queries=m.num_queries, drop=m.dropout,
+                        center_hidden=m.center_hidden, dense_hidden=m.dense_hidden, dense_convs=m.dense_convs,
+                        anchors_per_level=m.anchors_per_level, max_pos_queries=m.max_pos_queries)
     if m.arch == "center_detr":
         return CenterDETR3D(norm=m.norm, dim=m.dim, num_queries=m.num_queries, drop=m.dropout,
                             center_hidden=m.center_hidden, num_o2m=m.num_o2m, dn_number=m.dn_number,
@@ -35,8 +45,9 @@ def build_model(cfg: Config) -> Union[ABUSDet3D, CenterDETR3D]:
 
 
 def heads(cfg: Config) -> List[str]:
-    """Experts whose boxes are evaluated and saved: expert 2 ("detr") first, it drives checkpoint selection."""
-    return ["detr", "center"] if cfg.model.arch == "center_detr" else ["detr"]
+    """Outputs whose boxes are evaluated and saved; the first drives checkpoint selection."""
+    return {"center_detr": ["detr", "center"], "dense": ["dense", "dense_heat", "center"],
+            "co_detr": ["detr", "dense", "dense_heat"]}.get(cfg.model.arch, ["detr"])
 
 
 def _suffix(head: str) -> str:
@@ -90,13 +101,25 @@ class Trainer:
             torch.cuda.set_per_process_memory_fraction(min(1.0, cfg.train.max_gpu_mem_gb / total), index)
         self.splits = load_meta(cfg.paths.prep_dir)
         self.model = build_model(cfg).to(device)
+        if cfg.model.arch in ("dense", "co_detr"):  # our planning rule: k-means on the training box sizes
+            train_metas = train_val_metas(self.splits, cfg.data.train_splits, cfg.data.cv_folds, cfg.data.cv_fold)[0]
+            sizes = np.array([np.subtract(m["box"][3:], m["box"][:3]) for m in train_metas])
+            anchors = plan_anchors(sizes, per_level=cfg.model.anchors_per_level, seed=0)
+            self.model.dense.set_anchors(anchors)
+            os.makedirs(cfg.run_dir, exist_ok=True)
+            with open(os.path.join(cfg.run_dir, "anchors.json"), "w") as f:
+                json.dump({"anchor_sizes_vox": anchors.round(2).tolist(), "n_boxes": len(sizes)}, f)
         self.ema = copy.deepcopy(self.model).eval().requires_grad_(False) if cfg.train.ema_decay > 0 else None
         self.criterion = SetCriterion(cfg.loss.w_cls, cfg.loss.w_l1, cfg.loss.w_giou,
                                       w_neg=cfg.loss.w_neg, neg_iou=cfg.loss.neg_iou,
                                       iou_aware=cfg.loss.iou_aware_cls, high_order_alpha=cfg.loss.high_order_alpha)
         lc = cfg.loss
-        self.center_loss = None
-        if cfg.model.arch == "center_detr":
+        self.center_loss = self.dense_loss = None
+        if cfg.model.arch in ("dense", "co_detr"):
+            self.dense_loss = DenseLoss(lc.dense_candidates, lc.dense_batch_per_image, lc.dense_pos_fraction,
+                                        lc.dense_pool)
+            self.vox_scale = torch.tensor(PATCH * 2, dtype=torch.float32, device=device)
+        if cfg.model.arch in ("center_detr", "dense", "co_detr"):
             self.center_loss = CenterLoss(lc.w_center_heat, lc.w_center_size, lc.w_center_offset, lc.w_center_giou,
                                           lc.center_sigma_ratio, lc.center_min_sigma)
         t = cfg.train
@@ -196,7 +219,7 @@ class Trainer:
         model = build_model(cfg).to(self.device)
         model.load_state_dict(avg)
         preds = {h: predict_split(model, cfg, val_metas, self.device, head=h) for h in heads(cfg)}
-        res = compute_metrics(preds["detr"], val_metas, cfg.eval.iou_thrs)
+        res = compute_metrics(preds[heads(cfg)[0]], val_metas, cfg.eval.iou_thrs)
         self._log({"eval_swa": res, "it": it, "n_avg": self.swa_n}, prefix="EVAL ")
         torch.save({"model": avg, "it": it, "n_avg": self.swa_n, "val": res}, os.path.join(cfg.run_dir, "swa.pt"))
         for h, p in preds.items():
@@ -225,7 +248,9 @@ class Trainer:
         negs = [n.to(self.device) for n in batch[2]] if len(batch) > 2 else None
         self.criterion.high_order = it > cfg.loss.high_order_start * t.iters
         center_parts = extra_parts = None
-        if self.center_loss is None:
+        if self.dense_loss is not None:
+            loss, last, center_parts, extra_parts = self._dense_losses(x, targets)
+        elif self.center_loss is None:
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=t.amp):
                 dec_outputs, enc_output = self.model(x)
             loss, last = self.criterion.total(dec_outputs, enc_output, targets, negs)
@@ -262,7 +287,7 @@ class Trainer:
         if it % t.eval_every == 0 or it == stop:
             eval_model = self.ema if self.ema is not None else self.model
             preds = {h: predict_split(eval_model, cfg, val_metas, self.device, head=h) for h in heads(cfg)}
-            res = compute_metrics(preds["detr"], val_metas, cfg.eval.iou_thrs)
+            res = compute_metrics(preds[heads(cfg)[0]], val_metas, cfg.eval.iou_thrs)
             res["it"] = it
             self._log({"eval": res}, prefix="EVAL ")
             for h in heads(cfg)[1:]:
@@ -273,13 +298,44 @@ class Trainer:
             self._save("last.pt", it)
             if t.swa_last and it > stop - t.swa_last * t.eval_every:
                 self._accumulate_swa()
-            if res[cfg.eval.select_metric] > best:  # selection: expert 2 on Validation only
+            if res[cfg.eval.select_metric] > best:  # selection: the first output (heads) on Validation only
                 best = res[cfg.eval.select_metric]
                 self._save("best.pt", it, val=res)
                 for h, p in preds.items():
                     save_predictions(os.path.join(cfg.run_dir, f"preds_val_best{_suffix(h)}.json"), p, val_metas,
                                      {"checkpoint": "best.pt", "it": it, "head": h})
         return best
+
+    def _dense_losses(self, x: torch.Tensor, targets: List[torch.Tensor]):
+        """DenseDet3D: heat-map loss + dense box loss. CoDETR3D: one-to-one decoder (Hungarian, Rank-DETR losses if
+        enabled) + encoder proposals + aux heads on the encoder memory (heat map, dense boxes x ``w_dense``) +
+        customised positive queries from the dense head's ATSS positives (x ``w_pos_queries``)."""
+        cfg, lc, t = self.cfg, self.cfg.loss, self.cfg.train
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=t.amp):
+            if cfg.model.arch == "dense":
+                out = self.model(x)
+            else:
+                state = self.model.encode(x)
+                out = self.model.aux(state)
+                dec = self.model.decode(state)
+        center, center_parts = self.center_loss(out["center"], targets)
+        dense, dense_parts, match = self.dense_loss(out["dense"], targets, self.vox_scale)
+        extra = {"dense": dense.detach(), "dense_pos": dense_parts["pos"]}
+        if cfg.model.arch == "dense":
+            return center + lc.w_dense * dense, dense_parts["cls"] + dense_parts["reg"], center_parts, extra
+        loss = sum(self.criterion(o, targets) for o in dec) + self.criterion(self.model.transformer.encoder_output(state),
+                                                                            targets)
+        last = self.criterion(dec[-1], targets).detach()
+        loss = loss + center + lc.w_dense * dense
+        if lc.w_pos_queries > 0:
+            ref, index, pairs = positive_queries(out["dense"], match, targets, self.model.max_pos_queries,
+                                                 self.model.min_pos_queries)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=t.amp):
+                pos_dec = self.model.decode(state, pos_ref=ref, pos_index=index)
+            pos_loss = sum(self.criterion.assigned_loss(o, targets, pairs) for o in pos_dec)
+            loss = loss + lc.w_pos_queries * pos_loss
+            extra["pos_queries"] = pos_loss.detach()
+        return loss, last, center_parts, extra
 
     @torch.no_grad()
     def _predict_test(self) -> None:

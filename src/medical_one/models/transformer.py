@@ -140,16 +140,8 @@ class Transformer3D(nn.Module):
             self._static_cache[key] = (pos, torch.cat(ref), props_unact, valid)
         return self._static_cache[key]
 
-    def forward(self, feats: List[torch.Tensor], query_index: Optional[torch.Tensor] = None,
-                query_ref: Optional[torch.Tensor] = None, extra_ref: Optional[torch.Tensor] = None,
-                attn_mask: Optional[torch.Tensor] = None) -> Tuple[List[Output], Output]:
-        """``query_index`` [B,K] (positions in the flattened level-0 grid) and ``query_ref`` [B,K,6] (center/size
-        boxes in (0,1)) replace the encoder top-K proposals as decoder queries (proposals of an external dense
-        head); both are treated as constants, like the encoder proposals.
-
-        ``extra_ref`` [B,E,6] (center/size in (0,1)) appends E queries after the K proposal queries, built like
-        DINO's denoising queries: position from the box, content = the learned ``extra_embed``. ``attn_mask``
-        [K+E, K+E] (True = blocked) is applied in every decoder self-attention. Outputs cover all K+E queries."""
+    def encode(self, feats: List[torch.Tensor]) -> Dict[str, object]:
+        """Deformable encoder + the two-stage proposal head; the state is consumed by ``decode``."""
         shapes = [tuple(f.shape[2:]) for f in feats]
         B = feats[0].shape[0]
         pos_levels, ref, props_unact, valid = self._static(shapes, feats[0].device)
@@ -161,23 +153,45 @@ class Transformer3D(nn.Module):
         for layer in self.encoder.layers:
             memory = layer(memory, pos, enc_ref, shapes)
 
-        # Two-stage: score every position, keep TopK as decoder queries.
         out_mem = self.enc_output_norm(self.enc_output(memory.masked_fill(~valid[None, :, None], 0)))
         enc_logits = self.decoder.class_embed[-1](out_mem)
         enc_unact = self.decoder.bbox_embed[-1](out_mem) + props_unact[None]
+        return {"shapes": shapes, "memory": memory, "out_mem": out_mem, "valid": valid,
+                "enc_logits": enc_logits, "enc_unact": enc_unact}
+
+    @staticmethod
+    def memory_maps(state: Dict[str, object]) -> List[torch.Tensor]:
+        """Encoder memory as per-level maps [B, C, D, H, W] (for dense auxiliary heads, Co-DETR)."""
+        memory, maps, start = state["memory"], [], 0
+        for shape in state["shapes"]:
+            n = shape[0] * shape[1] * shape[2]
+            maps.append(memory[:, start:start + n].transpose(1, 2).reshape(memory.shape[0], -1, *shape))
+            start += n
+        return maps
+
+    def _box_queries(self, ref: torch.Tensor, dtype) -> Tuple[torch.Tensor, torch.Tensor]:
+        """(position embedding, content from the position) of center/size boxes [B, K, 6]."""
+        query_pos, query = self.pos_trans_norm(self.pos_trans(sine_embed(ref, 2 * self.dim // 6).to(dtype))) \
+            .split(self.dim, -1)
+        return query_pos, query
+
+    def decode(self, state: Dict[str, object], query_index: Optional[torch.Tensor] = None,
+               query_ref: Optional[torch.Tensor] = None, extra_ref: Optional[torch.Tensor] = None,
+               attn_mask: Optional[torch.Tensor] = None) -> List[Output]:
+        """Decoder on the encoder ``state``; arguments as in ``forward``."""
+        memory, out_mem, shapes = state["memory"], state["out_mem"], state["shapes"]
         if query_index is None:
-            topk = enc_logits[..., 0].float().masked_fill(~valid[None], float("-inf")).topk(self.num_queries, dim=1)[1]
-            ref_q = torch.gather(enc_unact, 1, topk[..., None].expand(-1, -1, 6)).detach().sigmoid()
+            topk = state["enc_logits"][..., 0].float().masked_fill(~state["valid"][None], float("-inf")) \
+                .topk(self.num_queries, dim=1)[1]
+            ref_q = torch.gather(state["enc_unact"], 1, topk[..., None].expand(-1, -1, 6)).detach().sigmoid()
         else:
             topk, ref_q = query_index, query_ref.detach().float()
-        query_pos, query = self.pos_trans_norm(
-            self.pos_trans(sine_embed(ref_q, 2 * self.dim // 6).to(src.dtype))).split(self.dim, -1)
+        query_pos, query = self._box_queries(ref_q, memory.dtype)
         topk_mem = torch.gather(out_mem, 1, topk[..., None].expand(-1, -1, self.dim)).detach()
         query = query + self.pix_trans_norm(self.pix_trans(topk_mem))
         if extra_ref is not None and extra_ref.shape[1]:
             extra_ref = extra_ref.detach().float()
-            e_pos, e_query = self.pos_trans_norm(
-                self.pos_trans(sine_embed(extra_ref, 2 * self.dim // 6).to(src.dtype))).split(self.dim, -1)
+            e_pos, e_query = self._box_queries(extra_ref, memory.dtype)
             query = torch.cat([query, e_query + self.extra_embed.to(e_query.dtype)], 1)
             query_pos = torch.cat([query_pos, e_pos], 1)
             ref_q = torch.cat([ref_q, extra_ref], 1)
@@ -191,7 +205,22 @@ class Transformer3D(nn.Module):
             outputs.append({"logits": self.decoder.class_embed[lid](query).float(), "boxes": boxes})
             prev = boxes if self.look_forward_twice else boxes.detach()
             ref_q = boxes.detach()
+        return outputs
 
-        enc_out = {"logits": enc_logits.float().masked_fill(~valid[None, :, None], -1e4),
-                   "boxes": enc_unact.float().masked_fill(~valid[None, :, None], 0).sigmoid()}
-        return outputs, enc_out
+    def encoder_output(self, state: Dict[str, object]) -> Output:
+        valid = state["valid"]
+        return {"logits": state["enc_logits"].float().masked_fill(~valid[None, :, None], -1e4),
+                "boxes": state["enc_unact"].float().masked_fill(~valid[None, :, None], 0).sigmoid()}
+
+    def forward(self, feats: List[torch.Tensor], query_index: Optional[torch.Tensor] = None,
+                query_ref: Optional[torch.Tensor] = None, extra_ref: Optional[torch.Tensor] = None,
+                attn_mask: Optional[torch.Tensor] = None) -> Tuple[List[Output], Output]:
+        """``query_index`` [B,K] (positions in the flattened multi-level memory; level 0 first) and ``query_ref``
+        [B,K,6] (center/size boxes in (0,1)) replace the encoder top-K proposals as decoder queries (proposals of
+        an external dense head); both are treated as constants, like the encoder proposals.
+
+        ``extra_ref`` [B,E,6] (center/size in (0,1)) appends E queries after the K proposal queries, built like
+        DINO's denoising queries: position from the box, content = the learned ``extra_embed``. ``attn_mask``
+        [K+E, K+E] (True = blocked) is applied in every decoder self-attention. Outputs cover all K+E queries."""
+        state = self.encode(feats)
+        return self.decode(state, query_index, query_ref, extra_ref, attn_mask), self.encoder_output(state)
