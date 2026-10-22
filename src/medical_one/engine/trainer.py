@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from ..config import Config
-from ..data.dataset import PATCH, PatchDataset, collate
+from ..data.dataset import PatchDataset, collate
 from ..data.tdsc import load_meta, load_volume, train_val_metas
 from ..evaluation.metrics import compute_metrics
 from ..evaluation.preds import save_predictions
@@ -64,6 +64,7 @@ def predict_split(model, cfg: Config, metas: List[dict], device: str,
     for m in models:
         m.eval()
     post = cfg.eval.postprocess()
+    post["patch"] = tuple(cfg.data.patch)
     if head:
         post["head"] = head
     preds = []
@@ -118,7 +119,7 @@ class Trainer:
         if cfg.model.arch in ("dense", "co_detr"):
             self.dense_loss = DenseLoss(lc.dense_candidates, lc.dense_batch_per_image, lc.dense_pos_fraction,
                                         lc.dense_pool)
-            self.vox_scale = torch.tensor(PATCH * 2, dtype=torch.float32, device=device)
+            self.vox_scale = torch.tensor(tuple(cfg.data.patch) * 2, dtype=torch.float32, device=device)
         if cfg.model.arch in ("center_detr", "dense", "co_detr"):
             self.center_loss = CenterLoss(lc.w_center_heat, lc.w_center_size, lc.w_center_offset, lc.w_center_giou,
                                           lc.center_sigma_ratio, lc.center_min_sigma)
@@ -177,7 +178,10 @@ class Trainer:
                                noise_std=cfg.data.noise_std, negatives=negatives, neg_prob=cfg.data.neg_prob,
                                extra_aug={"rot90": cfg.data.rot90_prob, "blur": cfg.data.blur_prob,
                                           "speckle": cfg.data.speckle_prob, "lowres": cfg.data.lowres_prob,
-                                          "inv_gamma": cfg.data.inv_gamma_prob})
+                                          "inv_gamma": cfg.data.inv_gamma_prob, "shadow": cfg.data.shadow_prob},
+                               patch=cfg.data.patch, scale_prob=cfg.data.scale_prob, scale_iso=cfg.data.scale_iso,
+                               scale_axis=cfg.data.scale_axis, paste_prob=cfg.data.paste_prob,
+                               paste_context=cfg.data.paste_context, small_oversample=cfg.data.small_oversample)
         # Online bootstrapping: the run is cut into segments; after each, the current model re-mines its own
         # false positives on the training cases and the next segment's loader (fresh workers) samples them.
         bounds = [b for b in range(every, stop, every)] + [stop] if every > 0 else [stop]
@@ -279,6 +283,8 @@ class Trainer:
             rec = {"it": it, "loss": round(loss.item(), 4), "last": round(last.item(), 4),
                    "gnorm": round(grad_norm.item(), 3), "lr": self.opt.param_groups[0]["lr"],
                    "sec": round(time.time() - start, 1)}
+            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                rec["mem_gb"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
             if center_parts is not None:
                 rec["center"] = {k: round(v.item(), 4) for k, v in center_parts.items()}
             if extra_parts:

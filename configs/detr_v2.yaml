@@ -1,0 +1,54 @@
+# DETR v2 (docs/prereg/detr_v2.md): the original two-stage deformable DETR (configs/abus3d_tdsc.yaml) with the
+# training recipe of the self-configuring frameworks: long fixed-length training, three-axis zoom + intensity
+# augmentation, weight averaging (SWA of the last 5 evaluations, the deliverable checkpoint), dropout 0.1.
+# Boxes only. Single-factor arms on top of it are set with overrides (scripts/slurm/detr_v2_jubail.sh).
+name: detr_v2
+paths:
+  tdsc_root: ~/data-001/langtian/data/medical-image/ABUS_TDSC
+  extracted_train: ~/langtian/abus3d_repro/data/raw
+  prep_dir: ~/langtian/abus3d_repro/data/prep
+  runs_dir: ~/langtian/abus3d_repro/runs
+model:
+  arch: detr
+  norm: gn
+  dim: 192
+  num_queries: 900
+  dropout: 0.1             # was 0.0
+data:
+  pos_prob: 0.5            # was 0.7; nnDetection's foreground share (risk analysis R3 of 10-22)
+  margin: 24
+  num_workers: 5
+  patch: [176, 96, 176]
+  scale_prob: 0.25         # three-axis zoom (nnU-Net: scale 0.7-1.4, p 0.2), box-exact, zero-padded
+  scale_iso: [0.7, 1.4]
+  scale_axis: 0.1          # + independent +-10% per axis
+  noise_std: 8.0           # intensity set of DenseDet3D / CoDETR3D (nnDetection base_more, nnU-Net low-res)
+  blur_prob: 0.2
+  speckle_prob: 0.2
+  lowres_prob: 0.25
+  inv_gamma_prob: 0.1
+  rot90_prob: 0.0          # E14: rot90 hurts
+loss:
+  w_cls: 2.0
+  w_l1: 5.0
+  w_giou: 2.0
+train:
+  iters: 36000             # was 6000 (pilot6k) / 12000; ~72k patches seen
+  batch_size: 2
+  lr: 2.0e-4
+  offset_lr_mult: 0.1
+  weight_decay: 1.0e-4
+  warmup_iters: 500
+  grad_clip: 0.1
+  amp: false               # V100: no bf16
+  log_every: 50
+  eval_every: 1500
+  seed: 0
+  ema_decay: 0.999
+  swa_last: 5              # average of the EMA weights at 30k, 31.5k, 33k, 34.5k, 36k -> swa.pt (deliverable)
+  max_gpu_mem_gb: 0
+eval:
+  iou_thrs: [0.1, 0.3]
+  select_metric: tdsc_froc # best.pt is kept for reference only; selection is swa.pt (fixed length)
+  score_thr: 0.0           # inference as CoDETR3D (E15: score_thr 0.01 cut recall)
+  window_nms: 0.1

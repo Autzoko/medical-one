@@ -58,6 +58,14 @@ class DataConfig:
     speckle_prob: float = 0.0  # multiplicative noise x * (1 + N(0, s)), s ~ U(0, 0.1) (ultrasound speckle)
     lowres_prob: float = 0.0  # simulate low resolution: zoom U(0.5, 1) nearest down, linear up (nnU-Net: p 0.25)
     inv_gamma_prob: float = 0.0  # gamma on the inverted image (nnDetection base_more: p 0.1)
+    shadow_prob: float = 0.0  # synthetic acoustic shadow towards the deep side (see PatchDataset)
+    patch: List[int] = field(default_factory=lambda: [176, 96, 176])  # training patch = inference window (d, h, w)
+    scale_prob: float = 0.0  # > 0: zoom all three axes (replaces scale_range), z ~ U(scale_iso), x U(1 -/+ scale_axis)
+    scale_iso: List[float] = field(default_factory=lambda: [0.7, 1.4])
+    scale_axis: float = 0.0
+    paste_prob: float = 0.0  # copy another training lesion (box + context, ellipsoid blend) into the patch
+    paste_context: float = 0.2
+    small_oversample: float = 0.0  # a > 0: lesion-centred patches pick cases with weight (volume / median)^-a
 
 
 @dataclass

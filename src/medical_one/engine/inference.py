@@ -8,6 +8,7 @@ follows the deployed post-processing (inclusive-IoU window NMS, single-source WB
 see ``pipeline.fusion``). ``predict_volume_fused`` adds flip test-time augmentation and multi-model
 ensembling on top, fused with WBF.
 """
+import math
 from typing import Sequence, Tuple
 
 import numpy as np
@@ -20,31 +21,44 @@ WINDOW_STARTS = (0, 80, 160)
 CENTER_MARGIN = 22
 
 
-def _center_keep(centers: torch.Tensor, sd: int, sw: int) -> torch.Tensor:
-    def bounds(start, size):
-        lo = 0 if start == WINDOW_STARTS[0] else CENTER_MARGIN
-        hi = size if start == WINDOW_STARTS[-1] else size - CENTER_MARGIN
+def window_starts(size: int, patch: int) -> Tuple[int, ...]:
+    """Evenly spaced window starts covering ``size`` with at least 50% overlap (336 / 176 -> 0, 80, 160)."""
+    if patch >= size:
+        return (0,)
+    n = math.ceil((size - patch) / (patch * 0.5)) + 1
+    return tuple(int(round(i * (size - patch) / (n - 1))) for i in range(n))
+
+
+def _center_keep(centers: torch.Tensor, sd: int, sw: int, starts_d: Sequence[int] = WINDOW_STARTS,
+                 starts_w: Sequence[int] = WINDOW_STARTS, patch: Sequence[int] = PATCH) -> torch.Tensor:
+    def bounds(start, starts, size):
+        lo = 0 if start == starts[0] else CENTER_MARGIN
+        hi = size if start == starts[-1] else size - CENTER_MARGIN
         return lo, hi
 
-    (ld, hd), (lw, hw) = bounds(sd, PATCH[0]), bounds(sw, PATCH[2])
+    (ld, hd), (lw, hw) = bounds(sd, starts_d, patch[0]), bounds(sw, starts_w, patch[2])
     return (centers[:, 0] > ld) & (centers[:, 0] < hd) & (centers[:, 2] > lw) & (centers[:, 2] < hw)
 
 
 @torch.no_grad()
 def predict_volume(model, volume: np.ndarray, device: str = "cuda", top_k: int = 300, score_thr: float = 0.01,
                    window_nms: float = 0.05, max_per_window: int = 100, fuse_nms: float = 0.1,
-                   max_dets: int = 50, deployed_fusion: bool = False,
-                   head: str = "detr") -> Tuple[torch.Tensor, torch.Tensor]:
+                   max_dets: int = 50, deployed_fusion: bool = False, head: str = "detr",
+                   patch: Sequence[int] = PATCH) -> Tuple[torch.Tensor, torch.Tensor]:
     """Returns (boxes [N,6] corners in working-space voxels, scores [N]) sorted by score. ``head`` selects the
-    expert of a ``CenterDETR3D`` ("detr" or "center"); other models only have "detr"."""
+    expert of a ``CenterDETR3D`` ("detr" or "center"); other models only have "detr". ``patch`` = the training
+    patch (d, h, w); windows cover d and w (``window_starts``), h is taken whole."""
+    patch = tuple(patch)
+    assert patch[1] == volume.shape[1], "windows span the whole depth axis"
+    starts_d, starts_w = window_starts(volume.shape[0], patch[0]), window_starts(volume.shape[2], patch[2])
     x = normalize(torch.from_numpy(volume).float().to(device))
-    scale = torch.tensor(PATCH * 2, device=device, dtype=torch.float)
+    scale = torch.tensor(patch * 2, device=device, dtype=torch.float)
     all_boxes, all_scores = [], []
-    for sd in WINDOW_STARTS:
-        for sw in WINDOW_STARTS:
-            patch = x[sd:sd + PATCH[0], :, sw:sw + PATCH[2]].contiguous()[None, None]
+    for sd in starts_d:
+        for sw in starts_w:
+            window = x[sd:sd + patch[0], :, sw:sw + patch[2]].contiguous()[None, None]
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.startswith("cuda")):
-                logits, corners = model.predict(patch) if head == "detr" else model.predict(patch, head=head)
+                logits, corners = model.predict(window) if head == "detr" else model.predict(window, head=head)
             scores, boxes = logits[0, :, 0].float().sigmoid(), corners[0].float() * scale
             top = scores.topk(min(top_k, len(scores))).indices
             scores, boxes = scores[top], boxes[top]
@@ -52,7 +66,7 @@ def predict_volume(model, volume: np.ndarray, device: str = "cuda", top_k: int =
             scores, boxes = scores[keep], boxes[keep]
             keep = nms_3d(boxes, scores, window_nms, inclusive=deployed_fusion)[:max_per_window]
             scores, boxes = scores[keep], boxes[keep]
-            keep = _center_keep((boxes[:, :3] + boxes[:, 3:]) / 2, sd, sw)
+            keep = _center_keep((boxes[:, :3] + boxes[:, 3:]) / 2, sd, sw, starts_d, starts_w, patch)
             offset = torch.tensor([sd, 0, sw, sd, 0, sw], device=device, dtype=torch.float)
             all_boxes.append(boxes[keep] + offset)
             all_scores.append(scores[keep])
