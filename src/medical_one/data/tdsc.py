@@ -4,6 +4,7 @@ Raw NRRD array R is [N0, N1, N2] with N0 the depth axis (0.073 mm). As in the de
 V = R.transpose(1, 0, 2) flipped along depth -> [N1, N0, N2], trilinearly resized to
 ``RESIZE`` (align_corners=False), then only the first ``KEEP_DEPTH`` depth slices are kept.
 Lesion boxes come from the masks (half-open voxel boxes) and are mapped the same way.
+Baselines get only these boxes: ``export_box_masks`` writes cuboid masks for segmentation-based detectors.
 """
 import json
 import os
@@ -105,6 +106,31 @@ def export_masks(root: str, out_dir: str, extracted_train: str = "", workers: in
         jobs += [(roots, split, int(r.case_id), r.label) for r in df.itertuples()]
     with Pool(workers) as pool:
         return pool.map(_process_mask, jobs, chunksize=1)
+
+
+def box_mask(box: Sequence[float], shape: Sequence[int] = (RESIZE[0], KEEP_DEPTH, RESIZE[2])) -> np.ndarray:
+    """Cuboid mask of a working-space box (d0, h0, w0, d1, h1, w1): voxels [round(lo), round(hi)) per axis, at
+    least one voxel. The only "mask" a bbox-only baseline (nnDetection, nnU-Net) is given."""
+    lo = [min(max(int(np.floor(b + 0.5)), 0), n - 1) for b, n in zip(box[:3], shape)]
+    hi = [min(max(int(np.floor(b + 0.5)), l + 1), n) for b, l, n in zip(box[3:], lo, shape)]
+    mask = np.zeros(tuple(shape), np.uint8)
+    mask[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = 1
+    return mask
+
+
+def export_box_masks(prep_dir: str, out_name: str = "box_masks") -> List[Tuple[str, int, int]]:
+    """Cuboid masks from the boxes in meta.json under ``prep_dir/<out_name>/<split>/`` (Train and Validation only:
+    the training cases of the baselines)."""
+    res = []
+    for split, metas in load_meta(prep_dir).items():
+        if split == "Test":
+            continue
+        os.makedirs(os.path.join(prep_dir, out_name, split), exist_ok=True)
+        for m in metas:
+            mask = box_mask(m["box"])
+            np.save(os.path.join(prep_dir, out_name, split, f"{m['case']:03d}.npy"), mask)
+            res.append((split, m["case"], int(mask.sum())))
+    return res
 
 
 def preprocess_tdsc(root: str, out_dir: str, extracted_train: str = "", workers: int = 10) -> List[CaseMeta]:
