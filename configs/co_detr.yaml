@@ -1,4 +1,4 @@
-# CoDETR3D (docs/prereg/dense_codetr.md): two-stage deformable DETR (300 queries, Rank-DETR losses) + the dense box
+# CoDETR3D (docs/prereg/dense_codetr.md): two-stage deformable DETR (60 queries, Rank-DETR losses) + the dense box
 # head and the heat-map head of DenseDet3D as Co-DETR auxiliary one-to-many heads on the encoder memory; the dense
 # head's ATSS positives are fed as customised positive queries (second decoder pass, fixed targets). Inference
 # uses the one-to-one decoder ("detr"). Same data / training / selection settings as configs/dense_det.yaml.
@@ -16,10 +16,10 @@ model:
   dense_hidden: 128        # nnDetection head_channels
   dense_convs: 1           # nnDetection num_convs
   anchors_per_level: 3
-  num_queries: 300
+  num_queries: 60          # risk analysis R2: few objects per volume (Ickler 2023: 6-90; Xu 2024: >100 hurts)
   max_pos_queries: 300     # Co-DETR max_pos_coords
 data:
-  pos_prob: 0.7
+  pos_prob: 0.5            # nnDetection oversample_foreground_percent (risk analysis R3; was 0.7)
   margin: 24
   num_workers: 8
   scale_range: 0.2

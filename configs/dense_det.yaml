@@ -18,7 +18,7 @@ model:
   dense_convs: 1           # nnDetection num_convs
   anchors_per_level: 3
 data:
-  pos_prob: 0.7
+  pos_prob: 0.5            # nnDetection oversample_foreground_percent (risk analysis R3; was 0.7)
   margin: 24
   num_workers: 8
   scale_range: 0.2

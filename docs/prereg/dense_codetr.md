@@ -16,7 +16,7 @@ difference is dense supervision with in-batch hard negatives. Here we learn nnDe
     + GIoU (sum over sampled positives / their number).
   - Anchor shapes: our rule, k-means (log space) on the Train box sizes, 3 per level, small to large.
   - No segmentation head (bbox-only constraint).
-- **CoDETR3D** (`configs/co_detr.yaml`): two-stage deformable DETR (3 enc / 6 dec, 300 queries) on the same
+- **CoDETR3D** (`configs/co_detr.yaml`): two-stage deformable DETR (3 enc / 6 dec, 60 queries) on the same
   backbone, Rank-DETR losses (GIoU-aware classification; high-order matching -p * IoU^4 over the last 25%).
   Co-DETR (ICCV 2023, Sense-X/Co-DETR `co_deformable_detr_r50_1x_coco.py`): the dense box head and the heat-map
   head are auxiliary heads on the encoder memory (reshaped to per-level maps); dense-head loss weight
@@ -27,6 +27,7 @@ difference is dense supervision with in-batch hard negatives. Here we learn nnDe
 
 ## Shared settings
 - Data: official split, train = Train (100), selection on Validation (30), Test (70) predicted at the end only.
+- Patch sampling: 50% of patches keep the lesion center inside (nnDetection's foreground share), 50% random.
 - Augmentation: lateral flips, lateral zoom 0.8-1.2, gamma / contrast / brightness, Gaussian noise (std 8), blur 0.2,
   speckle 0.2, low-res 0.25, inverted gamma 0.1. **No rot90** (E14).
 - 12000 iterations, batch 2, AdamW 2e-4 (warmup 500, cosine), grad clip 0.1, EMA 0.999, Validation every 1000.
@@ -48,3 +49,9 @@ difference is dense supervision with in-batch hard negatives. Here we learn nnDe
 - Main comparison: each arm's deliverable vs the standard nnDetection single model (paired case bootstrap);
   "better" = higher Test FROC, "significantly better" = 95% CI lower bound > 0. Secondary: vs nnU-Net (0.644),
   DETR pilot6k (0.581), CenterDETR3D baseline (0.565) and v1 (0.456) of E12/E13, and DenseDet3D vs CoDETR3D.
+
+## Amendment 2026-10-22 (before any full training run; only 40-iteration smoke runs existed, Validation FROC 0)
+After the risk analysis (`_docs/analysis/3D检测潜在问题与对策调查.md`, outside the repo): positive-patch share
+0.7 -> 0.5 (both arms; R3) and CoDETR3D queries 300 -> 60 (R2). The other proposed changes (ellipse-box rotation,
+shadow augmentation, Train-subset monitoring, smoothed checkpoint selection, size-stratified reporting) need code
+and go to the next round; size-stratified Test results are added to the report as a secondary analysis only.
