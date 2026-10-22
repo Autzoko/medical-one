@@ -27,7 +27,8 @@ import numpy as np
 NNDET_REPO = "https://github.com/MIC-DKFZ/nnDetection.git"
 NNDET_COMMIT = "97a58f3110b71caf1b4bcc1851e67cf11e987fc5"
 TASK_ID, TASK = "101", "Task101_TDSC"
-MODEL = "RetinaUNetV001_D3V001_3d"
+PLAN = "D3V001_3d"
+PLUGINS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nndet_plugins")
 RAW_SPACING = (0.073, 0.2, 0.476)  # mm, raw axes N0 (depth), N1, N2
 LAUNCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nndet_launch.py")
 
@@ -120,12 +121,17 @@ def main() -> None:
     ap.add_argument("--docker", default="", help="official nnDetection image to run the nnDetection steps in")
     ap.add_argument("--gpu", default="0", help="--docker: GPU index passed to the container")
     ap.add_argument("--shm", default="16g", help="--docker: shared memory for the augmentation workers")
+    ap.add_argument("--module", default="RetinaUNetV001",
+                    help="nnDetection module; others are registered from nndet_plugins/ (RetinaUNetV001NoSeg: no "
+                         "segmentation loss)")
     args = ap.parse_args()
     import torch
 
     from medical_one.data.tdsc import load_meta
     from medical_one.evaluation.preds import save_predictions
 
+    model = f"{args.module}_{PLAN}"
+    plugin = args.module != "RetinaUNetV001"
     run_dir = os.path.abspath(os.path.join(args.runs_dir, args.name))
     os.makedirs(run_dir, exist_ok=True)
     splits = load_meta(args.prep_dir)
@@ -142,6 +148,7 @@ def main() -> None:
                   "-e", f"det_num_threads={args.threads}", "-e", "det_verbose=0",
                   # the image's protobuf is newer than its 2021 mlflow / tensorboard protos (protobuf's own fix)
                   "-e", "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python",
+                  *(["-e", "PYTHONPATH=/opt/mo/nndet_plugins"] if plugin else []),
                   "-v", f"{data}:/opt/data", "-v", f"{models}:/opt/models", "-v", f"{run_dir}:/opt/work",
                   "-v", f"{os.path.dirname(os.path.abspath(__file__))}:/opt/mo", "-w", "/opt/work", args.docker]
         launch_cmd = lambda cmd: docker + [f"nndet_{cmd}"]
@@ -156,11 +163,13 @@ def main() -> None:
 
         patch_repo(root)
         sys.path.insert(0, root)
+        if plugin:
+            env["PYTHONPATH"] = os.pathsep.join([PLUGINS] + [p for p in [env.get("PYTHONPATH", "")] if p])
         os.environ.update(env)
         launch_cmd = lambda cmd: [sys.executable, LAUNCH, root, cmd]
         cpath = lambda p: p
     task_dir = os.path.join(data, TASK)
-    fold_dir = os.path.join(models, TASK, MODEL, "fold0")
+    fold_dir = os.path.join(models, TASK, model, "fold0")
     pred_dir = os.path.join(fold_dir, "test_predictions")
     eval_metas = splits["Validation"] + splits["Test"]
     done = lambda: all(os.path.exists(os.path.join(pred_dir, f"{case_id(m)}_boxes.pkl")) for m in eval_metas)
@@ -184,8 +193,9 @@ def main() -> None:
             mode = "resume" if os.path.exists(os.path.join(fold_dir, "model_last.ckpt")) else "overwrite"
             run(launch_cmd("train") + [TASK_ID, "--sweep", "-o", "exp.fold=0", f"train.mode={mode}",
                           f"trainer_cfg.max_num_epochs={args.epochs}",
-                          f"trainer_cfg.num_train_batches_per_epoch={args.batches}"] + args.train_overrides, env)
-        run(launch_cmd("predict") + [TASK_ID, MODEL, "--fold", "0", "-npp", str(args.processes)], env)
+                          f"trainer_cfg.num_train_batches_per_epoch={args.batches}"]
+                + ([f"module={args.module}"] if plugin else []) + args.train_overrides, env)
+        run(launch_cmd("predict") + [TASK_ID, model, "--fold", "0", "-npp", str(args.processes)], env)
 
     for split in ("Validation", "Test"):
         preds = []
@@ -196,7 +206,7 @@ def main() -> None:
             order = np.argsort(-scores)[:100]
             preds.append((torch.from_numpy(boxes[order]).float(), torch.from_numpy(scores[order]).float()))
         save_predictions(os.path.join(run_dir, f"preds_{split}.json"), preds, splits[split],
-                         {"model": f"nndetection_{MODEL}", "commit": NNDET_COMMIT, "epochs": args.epochs,
+                         {"model": f"nndetection_{model}", "commit": NNDET_COMMIT, "epochs": args.epochs,
                           "batches_per_epoch": args.batches})
     print("done", flush=True)
 

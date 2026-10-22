@@ -11,6 +11,13 @@ lesion masks (the follow-up dataset has only boxes). Methods that need a mask ge
   (`scripts/baselines/nndet_pipeline.py`, RetinaUNetV001 / D3V001 plan, 50 x 2500 batches, nnDetection's own
   sweep on Validation, default test-time mirroring), only `--masks-dir <prep>/box_masks`. Separate data directory
   and run name; the stopped mask run is not touched.
+- **nnDetection, boxes, no segmentation loss** (`b_nndet_box_noseg`, 3090 GPU 0 after `b_nndet_box`; added 2026-10-22
+  before either nnDetection box run finished): identical, but module `RetinaUNetV001NoSeg`
+  (`scripts/baselines/nndet_plugins/`): the segmentation loss is weighted 0, so only the box classification /
+  regression supervise the network (nnDetection still needs the cuboid "mask" as its input format, for box extraction,
+  foreground sampling and planning). The untrained segmentation head stays because nnDetection's evaluation and
+  test-time mirroring read it. A 1-epoch x 20-batch smoke run goes first. Answers how much of nnDetection's result comes
+  from its segmentation branch when only boxes exist.
 - **nnU-Net, boxes** (`b_nnunet_box`, Jubail V100): `scripts/baselines/nnunet_pipeline.py`, 3d_fullres, 250 epochs,
   fold 0 = Train / Validation (as the mask run), `--masks-dir <prep>/box_masks`. Box variant (threshold / score) =
   highest Validation FROC of the four variants (ties: listed order).
@@ -23,7 +30,7 @@ lesion masks (the follow-up dataset has only boxes). Methods that need a mask ge
 ## Risks and what we do about them
 | # | Risk | Handling |
 |---|---|---|
-| B1 | Cuboid labels mark the tissue around the lesion as foreground (an ellipsoid fills ~52% of its box) | Inherent to bbox-only training; report the fill ratio of the real masks; detection targets (boxes) are unchanged |
+| B1 | Cuboid labels mark the tissue around the lesion as foreground: the real lesion fills on average 24.7% of its box (median 24.1%, min 10.0%; Train + Validation, measured 2026-10-22) | Inherent to giving boxes to a mask-based method; detection targets (boxes) are unchanged; the no-segmentation-loss run isolates this |
 | B2 | nnDetection's +-30 deg rotation (p 0.2) re-derives boxes from the rotated cuboid, which are looser (up to ~1.37x per axis) | Kept: the baseline is the default nnDetection; noted as a known bias |
 | B3 | Rounding to voxels moves each face by <= 0.5 voxel | Unit test; boxes >= ~10 voxels per axis, so negligible |
 | B4 | Overwriting the stopped mask run or its preprocessed data | New run names and data directories |
