@@ -12,7 +12,7 @@ import torch
 
 from ..config import Config
 from ..data.dataset import PatchDataset, collate
-from ..data.tdsc import load_meta, load_volume, train_val_metas
+from ..data.tdsc import inner_split, load_meta, load_volume, train_val_metas
 from ..evaluation.metrics import compute_metrics
 from ..evaluation.preds import save_predictions
 from ..hardneg import load_negatives, mine, save_negatives, union
@@ -103,7 +103,7 @@ class Trainer:
         self.splits = load_meta(cfg.paths.prep_dir)
         self.model = build_model(cfg).to(device)
         if cfg.model.arch in ("dense", "co_detr"):  # our planning rule: k-means on the training box sizes
-            train_metas = train_val_metas(self.splits, cfg.data.train_splits, cfg.data.cv_folds, cfg.data.cv_fold)[0]
+            train_metas = self._metas()[0]
             sizes = np.array([np.subtract(m["box"][3:], m["box"][:3]) for m in train_metas])
             anchors = plan_anchors(sizes, per_level=cfg.model.anchors_per_level, seed=0)
             self.model.dense.set_anchors(anchors)
@@ -165,9 +165,25 @@ class Trainer:
             state["raw"] = self.model.state_dict()
         torch.save(state, os.path.join(self.cfg.run_dir, name))
 
+    def _metas(self) -> Tuple[List[dict], List[dict], List[dict]]:
+        """(train, validation, held-out training cases of ``data.inner_fold``; empty without inner folds)."""
+        d = self.cfg.data
+        train, val = train_val_metas(self.splits, d.train_splits, d.cv_folds, d.cv_fold)
+        if d.inner_folds > 0:
+            train, held_out = inner_split(train, d.inner_folds, d.inner_fold)
+            return train, val, held_out
+        return train, val, []
+
+    def _case_weights(self, metas: List[dict]):
+        if not self.cfg.data.case_weight_file:
+            return None
+        with open(self.cfg.data.case_weight_file) as f:
+            w = {(c["split"], c["case"]): c["weight"] for c in json.load(f)["cases"]}
+        return [w[(m["split"], m["case"])] for m in metas]
+
     def fit(self) -> None:
         cfg, t = self.cfg, self.cfg.train
-        train_metas, val_metas = train_val_metas(self.splits, cfg.data.train_splits, cfg.data.cv_folds, cfg.data.cv_fold)
+        train_metas, val_metas, oof_metas = self._metas()
         stop = t.stop_iter or t.iters
         negatives = load_negatives(cfg.data.neg_file) if cfg.data.neg_file else None  # only train cases are read
         every = cfg.data.neg_refresh_every
@@ -181,7 +197,8 @@ class Trainer:
                                           "inv_gamma": cfg.data.inv_gamma_prob, "shadow": cfg.data.shadow_prob},
                                patch=cfg.data.patch, scale_prob=cfg.data.scale_prob, scale_iso=cfg.data.scale_iso,
                                scale_axis=cfg.data.scale_axis, paste_prob=cfg.data.paste_prob,
-                               paste_context=cfg.data.paste_context, small_oversample=cfg.data.small_oversample)
+                               paste_context=cfg.data.paste_context, small_oversample=cfg.data.small_oversample,
+                               case_weights=self._case_weights(train_metas))
         # Online bootstrapping: the run is cut into segments; after each, the current model re-mines its own
         # false positives on the training cases and the next segment's loader (fresh workers) samples them.
         bounds = [b for b in range(every, stop, every)] + [stop] if every > 0 else [stop]
@@ -197,8 +214,12 @@ class Trainer:
             if seg_end < stop:
                 negatives = self._refresh_negatives(it, train_metas, negatives)
                 dataset.set_negatives(negatives)
-        if self.swa_n:
-            self._finish_swa(stop, val_metas)
+        final = self._finish_swa(stop, val_metas) if self.swa_n else (self.ema or self.model)
+        if oof_metas:  # out-of-fold predictions of the held-out training cases (deliverable weights)
+            save_predictions(os.path.join(cfg.run_dir, "preds_oof.json"),
+                             predict_split(final, cfg, oof_metas, self.device), oof_metas,
+                             {"checkpoint": "swa.pt" if self.swa_n else "final", "it": stop,
+                              "inner_folds": cfg.data.inner_folds, "inner_fold": cfg.data.inner_fold})
         if cfg.train.predict_test:
             self._predict_test()
 
@@ -229,6 +250,7 @@ class Trainer:
         for h, p in preds.items():
             save_predictions(os.path.join(cfg.run_dir, f"preds_val_swa{_suffix(h)}.json"), p, val_metas,
                              {"checkpoint": "swa.pt", "it": it, "n_avg": self.swa_n, "head": h})
+        return model.eval()
 
     def _refresh_negatives(self, it: int, train_metas: List[dict], negatives):
         """In-sample mining with the evaluation model (EMA if enabled), merged with earlier negatives."""

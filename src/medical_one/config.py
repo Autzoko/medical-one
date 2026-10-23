@@ -66,6 +66,9 @@ class DataConfig:
     paste_prob: float = 0.0  # copy another training lesion (box + context, ellipsoid blend) into the patch
     paste_context: float = 0.2
     small_oversample: float = 0.0  # a > 0: lesion-centred patches pick cases with weight (volume / median)^-a
+    inner_folds: int = 0  # > 0: train on the training cases outside fold ``inner_fold`` (folds inside Train only;
+    inner_fold: int = 0   # Validation stays the validation set) and write preds_oof.json for the held-out fold
+    case_weight_file: str = ""  # per-case sampling weights (scripts/boost/boost_weights.py); empty = uniform
 
 
 @dataclass

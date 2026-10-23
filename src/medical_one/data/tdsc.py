@@ -168,6 +168,20 @@ def cv_split(splits: Dict[str, List[dict]], folds: int, fold: int, seed: int = 0
     return [m for m in pool if assign[m["case"]] != fold], [m for m in pool if assign[m["case"]] == fold]
 
 
+def inner_split(train: Sequence[dict], folds: int, fold: int, seed: int = 0) -> Tuple[List[dict], List[dict]]:
+    """K-fold split inside the training cases only (Validation / Test untouched), stratified by benign / malignant;
+    returns (train, held-out). Used for out-of-fold errors of training cases (boosting weights, hard negatives)."""
+    pool = sorted(train, key=lambda m: (m["split"], m["case"]))
+    rng = np.random.RandomState(seed)
+    assign = {}
+    for label in sorted({m["label"] for m in pool}):
+        keys = [(m["split"], m["case"]) for m in pool if m["label"] == label]
+        for i, j in enumerate(rng.permutation(len(keys))):
+            assign[keys[j]] = i % folds
+    return ([m for m in pool if assign[(m["split"], m["case"])] != fold],
+            [m for m in pool if assign[(m["split"], m["case"])] == fold])
+
+
 def train_val_metas(splits: Dict[str, List[dict]], train_splits: Sequence[str], cv_folds: int = 0,
                     cv_fold: int = 0) -> Tuple[List[dict], List[dict]]:
     if cv_folds > 0:

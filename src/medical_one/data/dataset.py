@@ -41,7 +41,9 @@ class PatchDataset(torch.utils.data.Dataset):
     laterally at random) into the patch at a random lateral position and the donor's own depth, blended with an
     ellipsoid weight that is 1 inside the box's inscribed ellipsoid and falls to 0 at the enlarged box; its box
     becomes a second target. ``small_oversample`` = a > 0: lesion-centred patches pick their case with weight
-    (box volume / median)^-a, clipped to [0.5, 2]. ``extra_aug["shadow"]``: a synthetic acoustic shadow (lateral
+    (box volume / median)^-a, clipped to [0.5, 2]. ``case_weights`` (aligned with ``metas``, e.g. AdaBoost-style
+    weights from out-of-fold errors): every patch picks its case with these weights (times the small-lesion weights
+    for lesion-centred patches). ``extra_aug["shadow"]``: a synthetic acoustic shadow (lateral
     Gaussian footprint, intensity x (1 - s) from a random depth towards the deep side, s ~ U(0.25, 0.8)).
 
     ``negatives`` maps (split, case) to hard-negative boxes (``hardneg``); then an item also returns the
@@ -55,7 +57,7 @@ class PatchDataset(torch.utils.data.Dataset):
                  neg_prob: float = 0.0, extra_aug: Optional[Dict[str, float]] = None,
                  patch: Sequence[int] = PATCH, scale_prob: float = 0.0, scale_iso: Sequence[float] = (0.7, 1.4),
                  scale_axis: float = 0.0, paste_prob: float = 0.0, paste_context: float = 0.2,
-                 small_oversample: float = 0.0):
+                 small_oversample: float = 0.0, case_weights: Optional[Sequence[float]] = None):
         self.patch = tuple(int(p) for p in patch)
         self.cases = [(load_volume(prep_dir, m), np.asarray(m["box"], np.float32)) for m in metas]
         self.keys = [(m["split"], m["case"]) for m in metas]
@@ -65,6 +67,8 @@ class PatchDataset(torch.utils.data.Dataset):
         self.paste_prob, self.paste_context = paste_prob, paste_context
         vol = np.array([np.prod(b[3:] - b[:3]) for _, b in self.cases])
         self.small_weights = np.clip((vol / np.median(vol)) ** -small_oversample, 0.5, 2.0) if small_oversample > 0 else None
+        self.case_weights = None if case_weights is None else np.asarray(case_weights, np.float64)
+        assert self.case_weights is None or (len(self.case_weights) == len(self.cases) and (self.case_weights > 0).all())
         assert neg_prob <= 1 - pos_prob + 1e-9, "negative patches are taken from the random share"
         self.set_negatives(negatives)
         self.neg_prob = neg_prob
@@ -118,13 +122,16 @@ class PatchDataset(torch.utils.data.Dataset):
         return out
 
     def _pick_case(self) -> Tuple[int, bool]:
-        if self.small_weights is None:
+        if self.small_weights is None and self.case_weights is None:
             idx = random.randrange(len(self.cases))
             return idx, random.random() < self.pos_prob
         positive = random.random() < self.pos_prob
-        if positive:
-            return random.choices(range(len(self.cases)), weights=self.small_weights)[0], True
-        return random.randrange(len(self.cases)), False
+        w = np.ones(len(self.cases)) if self.case_weights is None else self.case_weights
+        if positive and self.small_weights is not None:
+            w = w * self.small_weights
+        if self.case_weights is None and not positive:
+            return random.randrange(len(self.cases)), False
+        return random.choices(range(len(self.cases)), weights=w)[0], positive
 
     def _paste(self, x: np.ndarray, starts: Sequence[int], idx: int, avoid: np.ndarray):
         """Pastes another case's lesion into the crop ``x`` (crop coordinates, before resizing); returns the
