@@ -5,7 +5,7 @@
 Error of a training case (out of fold, official IoU > 0.3 in raw space): e = 1 - 1 / r, r = rank of the first
 hit among the case's boxes sorted by score (hit at rank 1 -> 0, rank 2 -> 0.5, no hit -> 1), so false positives
 ranked above the lesion and misses both count. AdaBoost update with a real-valued margin 1 - 2e:
-eps = mean(e) (clipped to [0.05, 0.95]), alpha = 0.5 ln((1 - eps) / eps), w = exp(alpha (2e - 1)), normalised to
+eps = mean(e) (clipped to [0.05, 0.45], so alpha >= 0.1 and hard cases are never down-weighted), alpha = 0.5 ln((1 - eps) / eps), w = exp(alpha (2e - 1)), normalised to
 mean 1, clipped to [w_min, w_max], mixed with the uniform weight (``--mix`` boosted share) and normalised again.
 """
 import argparse
@@ -31,7 +31,7 @@ def case_errors(preds, metas, iou_thr: float = 0.3):
 
 
 def boost_weights(errors: np.ndarray, w_min: float = 0.5, w_max: float = 3.0, mix: float = 0.5):
-    eps = float(np.clip(errors.mean(), 0.05, 0.95))
+    eps = float(np.clip(errors.mean(), 0.05, 0.45))
     alpha = 0.5 * np.log((1 - eps) / eps)
     w = np.exp(alpha * (2 * errors - 1))
     w = np.clip(w / w.mean(), w_min, w_max)

@@ -19,7 +19,8 @@ deliverable stays one DETR).
    25 held-out Train cases (inference as v2).
 2. Case weights (`scripts/boost/boost_weights.py`): error e = 1 - 1 / r with r the rank of the first official hit
    (IoU > 0.3, raw space) among the case's boxes by score (no hit: e = 1); AdaBoost with a real-valued margin:
-   eps = mean(e) clipped [0.05, 0.95], alpha = 0.5 ln((1 - eps) / eps), w = exp(alpha (2e - 1)), normalised to mean
+   eps = mean(e) clipped [0.05, 0.45] (amended 10-23 after the smoke run, before any real run: with eps > 0.5 alpha
+   turns negative and would down-weight the hard cases), alpha = 0.5 ln((1 - eps) / eps), w = exp(alpha (2e - 1)), normalised to mean
    1, clipped to [0.5, 3], mixed 50 / 50 with uniform, normalised again. Every training patch (lesion-centred and
    random) picks its case with these weights.
 3. Hard negatives from the same out-of-fold predictions (`scripts/hardneg/mine.py`, score >= 0.3, <= 5 per case,
