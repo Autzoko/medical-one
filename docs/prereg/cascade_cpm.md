@@ -49,3 +49,14 @@ nnU-Net); negatives and AdaBoost-style weighting are used throughout.
 | C5 | Stacking fitted on DETR-only candidates, applied to DETR + CPM fused scores | equal-weight WBF keeps scores in [0, 1]; the "+ CPM" stage is reported with and without the verifier |
 | C6 | Training-label boundary noise (organisers corrected only Test; Val 116 box 1.47x its main component) | reported per case; Test 175 (box 9.9x its lesion, stray voxels) is unreachable for every method |
 | C7 | Validation noise (30 cases) | 3 seeds, paired bootstrap, mechanism metrics |
+
+## Amendment 2026-10-23 (before any full run of this round)
+- **CPM3D paused** (user decision): `cpm_s*` / `cpm_boost_s*` are not run in this round (code and smoke results kept;
+  measured 9.6 GB, 0.87 s/it). The cascade is DETR v3 -> verifier; the "+ CPM" stage is dropped from the chain.
+- **`detr_v3_p256_s{0,1,2}`** (user decision): DETR v3 with 256 x 96 x 256 patches / windows (`data.patch=[256,96,256]`),
+  ~14 h per seed. Reason: patch256 passed the v2 rule (Val +0.051, bootstrap 0.85); on Validation its gain was in
+  small lesions (top-1 near misses 0.23 -> 0.07, 3 seeds), not in large-lesion box size (0.88 -> 0.86x), so it may
+  overlap with copy-paste. Read-out: v3_p256 vs v3, same rule (3-seed mean +0.03, bootstrap > 0 in >= 80%); the
+  verifier chain is run on whichever v3 the rule picks (v3 if neither passes).
+- Each launcher part writes its own boosting weights / negatives files (same inputs, deterministic), so parallel
+  jobs never read a half-written file.
