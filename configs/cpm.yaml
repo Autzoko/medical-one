@@ -1,0 +1,55 @@
+# CPM3D (docs/prereg/cascade_cpm.md): whole-volume center-points matching detector (CPM-Net style), the complementary
+# detector of the DETR cascade. Boxes only. The patch is the whole working volume (336 x 96 x 336), so training and
+# inference never cut a lesion; augmentation = the DETR v2 set + lesion copy-paste + synthetic shadow.
+name: cpm
+paths:
+  tdsc_root: ~/data-001/langtian/data/medical-image/ABUS_TDSC
+  extracted_train: ~/langtian/abus3d_repro/data/raw
+  prep_dir: ~/langtian/abus3d_repro/data/prep
+  runs_dir: ~/langtian/abus3d_repro/runs
+model:
+  arch: cpm
+  norm: gn
+  cpm_hidden: 96
+  cpm_top_k: 100
+data:
+  pos_prob: 1.0            # the whole volume always holds the lesion (zoom-in crops keep its center inside)
+  margin: 24
+  num_workers: 5
+  patch: [336, 96, 336]
+  scale_prob: 0.25
+  scale_iso: [0.7, 1.4]
+  scale_axis: 0.1
+  noise_std: 8.0
+  blur_prob: 0.2
+  speckle_prob: 0.2
+  lowres_prob: 0.25
+  inv_gamma_prob: 0.1
+  rot90_prob: 0.0
+  paste_prob: 0.3
+  shadow_prob: 0.3
+loss:
+  cpm_topk: 7
+  cpm_alpha: 0.75
+  cpm_gamma: 2.0
+  cpm_ignore_inside: true
+train:
+  iters: 12000             # batch 2 whole volumes: 24k volumes seen (~240 passes over Train)
+  batch_size: 2
+  lr: 2.0e-4
+  offset_lr_mult: 1.0
+  weight_decay: 1.0e-4
+  warmup_iters: 500
+  grad_clip: 1.0
+  amp: false
+  log_every: 50
+  eval_every: 1000
+  seed: 0
+  ema_decay: 0.999
+  swa_last: 5              # EMA weights at 8k..12k averaged -> swa.pt (deliverable)
+  max_gpu_mem_gb: 0
+eval:
+  iou_thrs: [0.1, 0.3]
+  select_metric: tdsc_froc
+  score_thr: 0.0
+  window_nms: 0.1

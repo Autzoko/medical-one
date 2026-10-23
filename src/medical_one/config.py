@@ -17,7 +17,8 @@ class PathsConfig:
 @dataclass
 class ModelConfig:
     arch: str = "detr"  # "detr": ABUSDet3D; "center_detr": expert 1 (center heat map) + expert 2 (DETR), CenterDETR3D;
-    # "dense": DenseDet3D (heat map + dense anchor boxes); "co_detr": CoDETR3D (DETR + dense aux heads, Co-DETR)
+    # "dense": DenseDet3D (heat map + dense anchor boxes); "co_detr": CoDETR3D (DETR + dense aux heads, Co-DETR);
+    # "cpm": CPM3D (whole-volume center-points matching, models/cpm.py)
     norm: str = "gn"
     dim: int = 192
     num_queries: int = 900
@@ -34,6 +35,9 @@ class ModelConfig:
     dense_convs: int = 1  # conv blocks per tower (nnDetection num_convs)
     anchors_per_level: int = 3  # anchor shapes per level, k-means on the training box sizes
     max_pos_queries: int = 300  # co_detr: customised positive queries per image (Co-DETR max_pos_coords)
+    # cpm: whole-volume center-points matching detector (models/cpm.py)
+    cpm_hidden: int = 96  # channels of the cls / size / offset branches
+    cpm_top_k: int = 100  # local maxima kept per volume at inference
 
 
 @dataclass
@@ -100,6 +104,15 @@ class LossConfig:
     dense_pos_fraction: float = 0.33
     dense_pool: float = 20.0
     w_pos_queries: float = 1.0  # co_detr: customised positive queries (Co-DETR lambda_1)
+    # cpm (models/cpm.py); hard negatives use w_neg (negative cells inside a hard-negative box: (1 + w_neg) x loss)
+    cpm_topk: int = 7  # positives per box: cells inside it nearest to its center (CPM-Net: 7)
+    cpm_alpha: float = 0.75
+    cpm_gamma: float = 2.0
+    cpm_ignore_inside: bool = True  # other cells inside a GT box are ignored instead of negative
+    w_cpm_cls: float = 1.0
+    w_cpm_size: float = 1.0
+    w_cpm_offset: float = 1.0
+    w_cpm_giou: float = 1.0
 
 
 @dataclass

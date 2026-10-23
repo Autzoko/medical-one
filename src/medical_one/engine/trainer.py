@@ -19,15 +19,18 @@ from ..hardneg import load_negatives, mine, save_negatives, union
 from ..losses.set_criterion import SetCriterion
 from ..models.center_detr import CenterDETR3D
 from ..models.center_head import CenterLoss
+from ..models.cpm import CPM3D, CPMLoss
 from ..models.dense_det import CoDETR3D, DenseDet3D, positive_queries
 from ..models.dense_head import DenseLoss, plan_anchors
 from ..models.detector import ABUSDet3D
 from .inference import predict_volume, predict_volume_fused
 
 
-def build_model(cfg: Config) -> Union[ABUSDet3D, CenterDETR3D, DenseDet3D, CoDETR3D]:
+def build_model(cfg: Config) -> Union[ABUSDet3D, CenterDETR3D, DenseDet3D, CoDETR3D, CPM3D]:
     """Anchor shapes of the dense models are a buffer: set by the trainer (``plan_anchors``) or a checkpoint."""
     m = cfg.model
+    if m.arch == "cpm":
+        return CPM3D(norm=m.norm, hidden=m.cpm_hidden, top_k=m.cpm_top_k)
     if m.arch == "dense":
         return DenseDet3D(norm=m.norm, dim=m.dim, center_hidden=m.center_hidden, dense_hidden=m.dense_hidden,
                           dense_convs=m.dense_convs, anchors_per_level=m.anchors_per_level)
@@ -115,7 +118,10 @@ class Trainer:
                                       w_neg=cfg.loss.w_neg, neg_iou=cfg.loss.neg_iou,
                                       iou_aware=cfg.loss.iou_aware_cls, high_order_alpha=cfg.loss.high_order_alpha)
         lc = cfg.loss
-        self.center_loss = self.dense_loss = None
+        self.center_loss = self.dense_loss = self.cpm_loss = None
+        if cfg.model.arch == "cpm":
+            self.cpm_loss = CPMLoss(lc.cpm_topk, lc.cpm_alpha, lc.cpm_gamma, lc.w_cpm_cls, lc.w_cpm_size,
+                                    lc.w_cpm_offset, lc.w_cpm_giou, lc.cpm_ignore_inside, lc.w_neg)
         if cfg.model.arch in ("dense", "co_detr"):
             self.dense_loss = DenseLoss(lc.dense_candidates, lc.dense_batch_per_image, lc.dense_pos_fraction,
                                         lc.dense_pool)
@@ -274,7 +280,12 @@ class Trainer:
         negs = [n.to(self.device) for n in batch[2]] if len(batch) > 2 else None
         self.criterion.high_order = it > cfg.loss.high_order_start * t.iters
         center_parts = extra_parts = None
-        if self.dense_loss is not None:
+        if self.cpm_loss is not None:
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=t.amp):
+                out = self.model(x)
+            loss, center_parts = self.cpm_loss(out, targets, negs)
+            last = center_parts["cls"]
+        elif self.dense_loss is not None:
             loss, last, center_parts, extra_parts = self._dense_losses(x, targets)
         elif self.center_loss is None:
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=t.amp):
