@@ -4,7 +4,7 @@
 #   bash scripts/slurm/center_detr_v1_jubail.sh [seed ...]      (default: 0 1 2)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-git pull -q
+[ -n "${PULLED:-}" ] || { git pull -q; PULLED=1 exec bash "scripts/slurm/$(basename "$0")" "$@"; }  # rerun the pulled script text
 C=$(git rev-parse HEAD)
 S=/scratch/ll5582/langtian/abus3d
 seeds=("$@")

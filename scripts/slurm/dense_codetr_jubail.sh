@@ -5,7 +5,7 @@
 #   EXTRA="train.stop_iter=40 train.eval_every=20" NAME_SUFFIX=_smoke SEEDS=0 bash ... (smoke test)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-git pull -q
+[ -n "${PULLED:-}" ] || { git pull -q; PULLED=1 exec bash "scripts/slurm/$(basename "$0")" "$@"; }  # rerun the pulled script text
 C=$(git rev-parse HEAD)
 S=/scratch/ll5582/langtian/abus3d
 arms=("$@")

@@ -13,7 +13,7 @@
 # lanes, so at most $LANES of our nodes are busy at once.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-git pull -q
+[ -n "${PULLED:-}" ] || { git pull -q; PULLED=1 exec bash "scripts/slurm/$(basename "$0")" "$@"; }  # rerun the pulled script text
 C=$(git rev-parse HEAD)
 S=${SHARED:-/media/cvpr/langtian/abus3d}
 R=$S/runs

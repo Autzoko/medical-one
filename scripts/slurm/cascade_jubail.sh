@@ -9,7 +9,7 @@
 #     SEEDS=0 FOLDS_SUFFIX=_smoke bash scripts/slurm/cascade_jubail.sh     (smoke)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-git pull -q
+[ -n "${PULLED:-}" ] || { git pull -q; PULLED=1 exec bash "scripts/slurm/$(basename "$0")" "$@"; }  # rerun the pulled script text
 C=$(git rev-parse HEAD)
 S=/scratch/ll5582/langtian/abus3d
 X=${NAME_SUFFIX:-}

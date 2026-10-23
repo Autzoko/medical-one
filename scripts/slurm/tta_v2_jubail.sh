@@ -4,7 +4,7 @@
 #   bash scripts/slurm/tta_v2_jubail.sh [arm ...]   default: v2 paste shadow patch256, seeds 0-2, one job
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-git pull -q
+[ -n "${PULLED:-}" ] || { git pull -q; PULLED=1 exec bash "scripts/slurm/$(basename "$0")" "$@"; }  # rerun the pulled script text
 C=$(git rev-parse HEAD)
 S=/scratch/ll5582/langtian/abus3d
 arms=("$@")
