@@ -1,6 +1,7 @@
 #!/bin/bash
 # DETR v2 round (docs/prereg/detr_v2.md) on Jubail V100: the v2 recipe and its single-factor arms, seeds 0-2.
-#   bash scripts/slurm/detr_v2_jubail.sh [arm ...]   arms: v2 pos033 paste patch256 small shadow iouaware (default all)
+#   bash scripts/slurm/detr_v2_jubail.sh [arm ...]   arms: v2 pos033 paste patch256 small shadow iouaware nnaug
+#   (default: the first seven, the v2 round)
 #   EXTRA="train.stop_iter=40 train.eval_every=20 train.swa_last=2" NAME_SUFFIX=_smoke SEEDS=0 bash ... (smoke)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -15,6 +16,7 @@ declare -A ARM=(
     [small]="data.small_oversample=0.5"
     [shadow]="data.shadow_prob=0.3"
     [iouaware]="loss.iou_aware_cls=true"
+    [nnaug]="data.rot_prob=0.2 data.contrast_prob=0.15"   # docs/prereg/detr_nnaug.md
 )
 arms=("$@")
 [ ${#arms[@]} -gt 0 ] || arms=(v2 pos033 paste patch256 small shadow iouaware)

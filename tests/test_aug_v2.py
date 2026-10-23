@@ -112,3 +112,47 @@ def test_predict_volume_with_a_larger_patch():
     boxes, scores = predict_volume(m, np.zeros(SHAPE, np.uint8), "cpu", score_thr=0.0, patch=(256, 96, 256))
     assert m.shapes == [(1, 1, 256, 96, 256)] * 4
     assert len(boxes) >= 1 and (boxes[:, 3:] > boxes[:, :3]).all()
+
+
+def _ellipsoid_volume(box, shape=(176, 96, 176)):
+    lo, hi = np.array(box[:3], float), np.array(box[3:], float)
+    c, r = (lo + hi) / 2, (hi - lo) / 2
+    g = np.ogrid[:shape[0], :shape[1], :shape[2]]
+    inside = sum(((gi + 0.5 - c[a]) / r[a]) ** 2 for a, gi in enumerate(g)) <= 1
+    return torch.from_numpy(np.where(inside, 220.0, 60.0).astype(np.float32))
+
+
+@pytest.mark.parametrize("deg", [0.0, 20.0, -30.0, 90.0])
+def test_rotate_box_follows_ellipsoid(deg):
+    box = np.array([[50, 30, 70, 110, 60, 100]], np.float32)  # elongated in d, off-center
+    x = _ellipsoid_volume(box[0])
+    y, b = PatchDataset._rotate(x, box, np.radians(deg))
+    ext = _bright_extent(y[None])
+    assert torch.allclose(ext, torch.from_numpy(b[0]), atol=2.0), (ext, b[0])
+
+
+def test_rotate_90_matches_lateral_swap_on_square_patch():
+    box = np.array([[50, 30, 70, 110, 60, 100]], np.float32)
+    x = _ellipsoid_volume(box[0])
+    y, b = PatchDataset._rotate(x, box, np.radians(90.0))
+    # 90 deg: d' = D - w, w' = d about the center -> same extents as rot90 (+ a flip)
+    assert np.allclose(b[0, [3, 0]] - b[0, [0, 0]], [box[0, 5] - box[0, 2], 0], atol=1e-3)
+    assert y.shape == x.shape
+
+
+def test_rot_and_contrast_off_keep_rng_stream(make_ds):
+    random.seed(0); np.random.seed(0); torch.manual_seed(0)
+    a = make_ds(extra_aug={"blur": 0.2})[0]
+    random.seed(0); np.random.seed(0); torch.manual_seed(0)
+    b = make_ds(extra_aug={"blur": 0.2, "rot": 0.0, "contrast": 0.0})[0]
+    assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
+
+
+def test_rot_contrast_items_valid(make_ds):
+    ds = make_ds(cases=(1, 2), extra_aug={"rot": 1.0, "contrast": 1.0}, pos_prob=1.0)
+    random.seed(1)
+    for _ in range(10):
+        x, t = ds[0]
+        assert torch.isfinite(x).all() and len(t) <= 2
+        if len(t):
+            assert ((t[:, 3:] - t[:, :3]) > 0).all() and (t >= 0).all() and (t <= 1).all()

@@ -31,7 +31,10 @@ class PatchDataset(torch.utils.data.Dataset):
 
     ``extra_aug`` (probabilities, all 0 by default; see ``DataConfig``): ``rot90`` swaps the lateral axes d and w
     (box-exact; the patch is square in d/w), ``blur`` / ``speckle`` / ``lowres`` / ``inv_gamma`` are intensity
-    transforms after nnDetection's ``base_more`` and nnU-Net's low-resolution simulation.
+    transforms after nnDetection's ``base_more`` and nnU-Net's low-resolution simulation. ``rot`` rotates the patch
+    about the depth axis h by U(-``rot_deg``, ``rot_deg``) (nnU-Net's rotation, restricted to the lateral plane as the
+    flips are: the depth axis carries acquisition physics); its boxes are the hulls of the rotated boxes' inscribed
+    ellipsoids. ``contrast`` is nnU-Net's contrast transform.
 
     ``patch`` sets the patch size (d, h, w); ``scale_prob`` > 0 replaces the lateral zoom by an nnU-Net-style zoom
     of all three axes: with that probability the crop is ``patch / (z * u_a)`` per axis, z ~ U(``scale_iso``) and
@@ -72,7 +75,8 @@ class PatchDataset(torch.utils.data.Dataset):
         assert neg_prob <= 1 - pos_prob + 1e-9, "negative patches are taken from the random share"
         self.set_negatives(negatives)
         self.neg_prob = neg_prob
-        self.extra_aug = {k: 0.0 for k in ("rot90", "blur", "speckle", "lowres", "inv_gamma", "shadow")}
+        self.extra_aug = {k: 0.0 for k in ("rot90", "blur", "speckle", "lowres", "inv_gamma", "shadow", "rot", "contrast")}
+        self.extra_aug["rot_deg"] = 30.0
         self.extra_aug.update(extra_aug or {})
         assert self.patch[0] == self.patch[2] or not self.extra_aug["rot90"], "rot90 needs a square lateral patch"
 
@@ -195,6 +199,8 @@ class PatchDataset(torch.utils.data.Dataset):
         if self.augment:
             x, b = self._augment(x, b)
             x, b = self._extra(x, b)
+            if self.extra_aug.get("rot", 0.0) > 0:  # a rotated lesion can leave the patch at its corners
+                inside &= ((b[:, 3:] - b[:, :3]) >= 1).all(1)
             if self.noise_std > 0:
                 x = x + torch.randn_like(x) * self.noise_std
         b = torch.from_numpy(b / self.scale)
@@ -208,6 +214,11 @@ class PatchDataset(torch.utils.data.Dataset):
         p = self.extra_aug
         if random.random() < p["rot90"]:  # lateral axis swap; with the two flips this spans all 8 symmetries
             x, b = x.permute(2, 1, 0).contiguous(), b[:, [2, 1, 0, 5, 4, 3]].copy()
+        if p.get("rot", 0.0) > 0 and random.random() < p["rot"]:  # draw only when on: earlier configs keep their RNG stream
+            x, b = self._rotate(x, b, math.radians(random.uniform(-p.get("rot_deg", 30.0), p.get("rot_deg", 30.0))))
+        if p.get("contrast", 0.0) > 0 and random.random() < p["contrast"]:
+            m, lo, hi = x.mean(), x.min(), x.max()
+            x = ((x - m) * random.uniform(0.75, 1.25) + m).clamp(lo, hi)
         if random.random() < p["inv_gamma"]:
             x = 255 - ((255 - x) / 255).clamp(1e-6, 1) ** math.exp(random.uniform(-0.3, 0.3)) * 255
         if random.random() < p["blur"]:
@@ -224,6 +235,28 @@ class PatchDataset(torch.utils.data.Dataset):
         if random.random() < p.get("shadow", 0.0):
             x = self._shadow(x)
         return x, b
+
+    @staticmethod
+    def _rotate(x: torch.Tensor, b: np.ndarray, theta: float) -> Tuple[torch.Tensor, np.ndarray]:
+        """Rotate a patch [D,H,W] by ``theta`` (radians) in the lateral d-w plane about its center (bilinear, zero
+        outside). Boxes only, no masks: each lesion is taken as its box's inscribed ellipsoid, whose rotated hull has
+        half-extents sqrt((a cos)^2 + (b sin)^2) and sqrt((a sin)^2 + (b cos)^2) (the rotated box's own hull would be
+        up to 1.41x too large)."""
+        D, H, W = x.shape
+        c, s = math.cos(theta), math.sin(theta)
+        dd, ww = torch.meshgrid(torch.arange(D) + 0.5 - D / 2, torch.arange(W) + 0.5 - W / 2, indexing="ij")
+        sd, sw = c * dd + s * ww + D / 2, -s * dd + c * ww + W / 2  # inverse rotation: where each output voxel samples
+        gh = ((torch.arange(H) + 0.5) / H * 2 - 1)[None, :, None].expand(D, H, W)
+        grid = torch.stack([(sw / W * 2 - 1)[:, None, :].expand(D, H, W), gh, (sd / D * 2 - 1)[:, None, :].expand(D, H, W)], -1)
+        x = F.grid_sample(x[None, None].float(), grid[None].float(), mode="bilinear", padding_mode="zeros",
+                          align_corners=False)[0, 0]
+        b = b.copy()
+        cd, cw = (b[:, 0] + b[:, 3]) / 2 - D / 2, (b[:, 2] + b[:, 5]) / 2 - W / 2
+        a, e = (b[:, 3] - b[:, 0]) / 2, (b[:, 5] - b[:, 2]) / 2
+        nd, nw = c * cd - s * cw + D / 2, s * cd + c * cw + W / 2
+        hd, hw = np.sqrt((a * c) ** 2 + (e * s) ** 2), np.sqrt((a * s) ** 2 + (e * c) ** 2)
+        b[:, 0], b[:, 3], b[:, 2], b[:, 5] = nd - hd, nd + hd, nw - hw, nw + hw
+        return x, np.clip(b, 0, np.asarray([D, H, W] * 2, np.float32))
 
     @staticmethod
     def _shadow(x: torch.Tensor) -> torch.Tensor:

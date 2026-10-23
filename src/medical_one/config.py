@@ -63,6 +63,9 @@ class DataConfig:
     lowres_prob: float = 0.0  # simulate low resolution: zoom U(0.5, 1) nearest down, linear up (nnU-Net: p 0.25)
     inv_gamma_prob: float = 0.0  # gamma on the inverted image (nnDetection base_more: p 0.1)
     shadow_prob: float = 0.0  # synthetic acoustic shadow towards the deep side (see PatchDataset)
+    rot_prob: float = 0.0  # rotation about the depth axis h, angle U(-rot_deg, rot_deg) (nnU-Net: +-30 deg, p 0.2)
+    rot_deg: float = 30.0
+    contrast_prob: float = 0.0  # contrast (x - mean) * U(0.75, 1.25) + mean, clipped to the patch range (nnU-Net: p 0.15)
     patch: List[int] = field(default_factory=lambda: [176, 96, 176])  # training patch = inference window (d, h, w)
     scale_prob: float = 0.0  # > 0: zoom all three axes (replaces scale_range), z ~ U(scale_iso), x U(1 -/+ scale_axis)
     scale_iso: List[float] = field(default_factory=lambda: [0.7, 1.4])
