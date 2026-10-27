@@ -20,7 +20,8 @@ shift
 L=$(mktemp -d "${TMPDIR:-/tmp}/abus3d_${SLURM_JOB_ID}_XXXX")
 trap 'rm -rf "$L"' EXIT
 echo "[$(date)] $(hostname) $(nvidia-smi --query-gpu=name --format=csv,noheader) commit=$COMMIT mode=$MODE $*"
-git clone -q https://github.com/Autzoko/medical-one.git "$L/code"
+git clone -q https://github.com/Autzoko/medical-one.git "$L/code" \
+    || { echo "GitHub unreachable, cloning $B/medical-one instead"; rm -rf "$L/code"; git clone -q "$B/medical-one" "$L/code"; }
 git -C "$L/code" checkout -q "$COMMIT"
 cd "$L/code"
 export PYTHONPATH="$L/code/src" PYTHONNOUSERSITE=1 PREP_DIR="$SHARED/data/prep" RUNS_DIR="$SHARED/runs" LOCAL_DIR="$L"
