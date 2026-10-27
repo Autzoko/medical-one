@@ -72,3 +72,27 @@ Next step, proposed to the user with the read-out (no run is started automatical
 | R4 | Box mapping errors (flip, half-voxel conventions) | all mappings are affine on box edges; `phase0` = `base` and `z` mapping checked on the GT-box hit rate of `base` |
 | R5 | Login-node work / data leaving the cluster | everything in Slurm jobs; no image data is written outside $S or committed |
 | R6 | Multiple comparisons (3 sigmas, 3 zooms, 4 diagnostics) | rules fixed above; everything else descriptive |
+
+## Results (2026-10-28, read-out `scripts/diag/small_lesion_readout.py`; Slurm jobs 18961365/66/68, 18969370-73)
+Sanity: `base` FROC equals the stored predictions for every seed on both splits (Val 0.6985/0.7328/0.7179, Test
+0.7184/0.6986/0.7399); resampler max |diff| 1 grey level on <= 0.031% of voxels. Lesion-score tests pool 3 seeds
+(Val small n = 30 lesion-seeds from 10 lesions, Test n = 69 from 23).
+
+| Rule | Validation (decides) | Test (replication) | Verdict |
+|---|---|---|---|
+| D1 | Train small first-hit median 0.949, small top-1 1.000 (Train FROC 1.000) | - | generalisation gap, not a size bias |
+| D2 (a) | phase std small 0.031 (< 0.05), large 0.010 | small 0.049, mid 0.064, large 0.024 | negative |
+| D2 (b) | 4-phase WBF small score median -0.006, p 0.09; FROC 0.712 vs 0.716 | median -0.001, p 0.57; FROC 0.731 vs 0.719 | negative |
+| D2b | shift std small 0.042 (< 0.05), large 0.030 | small 0.040, mid 0.063, large 0.025 | negative |
+| D3 | aa0.5 p 0.035 but median -0.002 (down); aa1 / aa1.5 n.s.; FROC -0.005 / -0.025 / -0.042 | aa1.5 small median +0.006, p 0.013; FROC -0.000 / -0.010 / -0.017 | negative |
+| D4 | z2 vs base small median +0.006 (mean +0.128), p 0.066; z1n +0.013 (mean +0.147), p 0.034; z1n vs z2 p 0.42; top-1 small 0.47 -> 0.60-0.63, FROC 0.716 -> 0.61-0.64 | z2 median -0.003, p 0.88; z1n p 0.84; top-1 small 0.42 -> 0.33-0.36 | no real-detail effect; size prior suggestive on Val only, not replicated |
+| D5 | CNR(aa1)/CNR(prep) small 1.14 (< 1.3); speckle FWHM N0/N1/N2 8.9/5.7/3.5 raw voxels | 1.13; 9.7/5.6/3.7 | premise of H-alias not met |
+
+Descriptive: depth speckle FWHM ~9 raw voxels ~ 1.2 working voxels (near critical sampling, not severe aliasing).
+Small lesions that lose top-1 to a false positive (seed 0) have higher CNR than that false positive (Val n 4: 0.96 vs
+0.15; Test n 11: 0.90 vs 0.54), with the false positive 1.6-1.8x larger. One-voxel shifts / sampling phases move the
+3-seed mean FROC within 0.673-0.727 (Val) and 0.701-0.739 (Test): differences below ~0.03 are within input jitter.
+
+Decision (by the rules above): D2, D2b and D3 negative on Validation and D5 not met -> the frequency /
+anti-aliasing direction is stopped. D4 shows no real-detail effect, so no 2x axial input arm. D1 points to a
+generalisation gap; the next arms are proposed to the user separately.
